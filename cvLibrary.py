@@ -6,15 +6,11 @@ import re
 import time
 import threading
 import pandas as pd
+from datetime import datetime
 
 thread_local = threading.local()
 
 company_list = []
-
-def get_company_list():
-    global company_list
-    df = pd.read_csv(r"C:\Users\birap\Downloads\2025-04-04_-_Worker_and_Temporary_Worker.csv")
-    company_list = list(df['Organisation Name'])
 
 def get_browser():
     """Get a thread-local browser instance"""
@@ -71,6 +67,9 @@ def scrape_page(page_num):
         for job in job_cards:
             try:
                 section_element = job.find("article")
+                if not section_element:
+                    continue
+
                 title = section_element.get("data-job-title", "")
                 company = section_element.get("data-company-name", "")
                 location = section_element.get("data-job-location", "")
@@ -81,19 +80,31 @@ def scrape_page(page_num):
                 job_url = f'https://www.cv-library.co.uk/job/{job_id}' if job_id else ""
 
                 company_logo_element = job.select_one("img.job__logo")
-                company_logo = company_logo_element.get("src", "") if company_logo_element else ""
+                company_logo = company_logo_element.get("data-src", "") if company_logo_element else ""
 
-                if company in company_list:
-                    jobs_on_page.append({
-                                    "Title": title,
-                                    "Company": company,
-                                    "Location": location,
-                                    "Salary": salary,
-                                    "Job Type": job_type,
-                                    "URL": job_url,
-                                    "Date Posted": date_posted,
-                                    "Company Logo": company_logo
-                                })
+                description_element = job.select_one('a.job__description-more')
+                description_link = ""
+                if description_element and description_element.has_attr("href"):
+                    description_link = f"https://www.cv-library.co.uk{description_element['href']}"
+
+                ingestion_time = datetime.utcnow().isoformat()
+
+                jobs_on_page.append({
+                    "title": title,
+                    "experience": "",
+                    "salary": salary,
+                    "location": location,
+                    "job_type": job_type,
+                    "url": job_url,
+                    "description": description_link,
+                    "posted_date": date_posted,
+                    "company_logo": company_logo,
+                    "country": "UK",
+                    "source": "cv_library",
+                    "ingestion_timestamp": ingestion_time
+                })
+
+
             except Exception as e:
                 print(f"Error parsing job on page {page_num}: {e}")
     
@@ -147,11 +158,16 @@ def get_job_listings(max_workers=5, max_pages=None):
     return job_list
 
 if __name__ == "__main__":
-    get_company_list()
     job_listings = get_job_listings(max_workers=30, max_pages=None)
     
-    with open("jobs.json", "w+", encoding="utf-8") as file:
-        json.dump(job_listings, file, indent=4)
+    # with open("jobs.json", "w+", encoding="utf-8") as file:
+    #     json.dump(job_listings, file, indent=4)
 
-    print(f"Sample of first 3 jobs:")
-    print(json.dumps(job_listings[:3], indent=4))
+    df = pd.DataFrame(job_listings)
+    df = df[[
+    "title", "experience", "salary", "location", "job_type",
+    "url", "description", "posted_date", "company_logo", "country", "source", "ingestion_timestamp"
+    ]]
+
+    df.to_csv("data/cv_library.csv", index=False)
+    print("CSV file saved as jobs.csv")
