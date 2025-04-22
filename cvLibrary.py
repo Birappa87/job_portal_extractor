@@ -20,6 +20,20 @@ from datetime import datetime
 thread_local = threading.local()
 company_list = []
 
+JOB_COLUMNS = [
+    "job_title",
+    "company_name",
+    "company_logo",
+    "salary",
+    "posted_date",
+    "experience",
+    "location",
+    "apply_link",
+    "data_source",
+    "job_id"
+]
+
+
 # Define the SQLAlchemy Base
 Base = declarative_base()
 
@@ -37,19 +51,15 @@ class Job(Base):
     location = Column(String(255), nullable=True)
     apply_link = Column(String, nullable=False)
     data_source = Column(String(180), nullable=False)
-    job_type = Column(String(100), nullable=True)
-    description = Column(String, nullable=True)
-    url = Column(String, nullable=True)
     country = Column(String(50), nullable=True)
     ingestion_timestamp = Column(String, nullable=True)
-    external_job_id = Column(String(100), nullable=True, unique=True)
 
 # Database setup function
 def setup_database():
     """Initialize the database connection and tables"""
     try:
         # Create database engine - adjust connection string as needed
-        engine = create_engine('sqlite:///jobs_database.db', echo=False)
+        engine = create_engine('postgresql://postgres.gncxzrslsmbwyhefawer:tRIOI1iU59gyK1nk@aws-0-eu-west-2.pooler.supabase.com:6543/postgres', echo=False)
         
         # Create tables
         Base.metadata.create_all(engine)
@@ -164,6 +174,7 @@ def parse_date(date_str):
     formats = [
         "%d/%m/%Y",                 # 19/04/2025
         "%Y-%m-%dT%H:%M:%SZ",       # 2025-04-19T17:49:01Z
+        "%Y-%m-%dT%H:%M:%S.%fZ",    # 2025-04-22T16:11:27.096Z (with milliseconds)
         "%Y-%m-%d %H:%M:%S",        # 2025-04-19 17:49:01
         "%Y-%m-%d"                  # 2025-04-19
     ]
@@ -233,13 +244,19 @@ def scrape_page(page_num):
 
                 # If the apply link is relative, prepend the base URL
                 base_url = "https://www.cv-library.co.uk"
+                
+                apply_link = ''
+                if apply_tag and 'href' in apply_tag.attrs:
+                    apply_link = apply_tag['href']
+                    if apply_link.endswith('/apply'):
+                        apply_link = apply_link[:-6]
+
                 if apply_link and apply_link.startswith("/"):
                     apply_link = base_url + apply_link
+                elif not apply_link and job_url:
+                    # Use job URL as fallback if no apply link
+                    apply_link = job_url
 
-                # Ensure apply_link is not empty (required field)
-                if not apply_link:
-                    apply_link = job_url if job_url else base_url
-                    
                 ingestion_time = datetime.utcnow().isoformat()
 
                 # Parse the date posted using our flexible parser
@@ -248,8 +265,12 @@ def scrape_page(page_num):
                 # Mandatory fields validation
                 if not title:
                     title = "Untitled Position"
+
                 if not company:
                     company = "Unknown Company"
+
+                if '/hour' in salary.lower():
+                    continue
 
                 if company in company_list:
                     jobs_on_page.append({
@@ -292,48 +313,46 @@ def cleanup_resources():
         error_message = f"Failed to clean up resources: {str(e)}"
         notify_failure(error_message, "cleanup_resources")
 
-def upsert_jobs(job_list, session):
-    """Insert or update job listings in the database"""
+def batch_upsert_jobs(job_list, session, data_source='cv_library'):
+    """Batch insert job listings into the database after deleting existing records with the same source"""
     try:
-        inserted = 0
-        updated = 0
-        
-        for job_data in job_list:
-            # Ensure all required fields have values
-            for field in ["job_title", "company_name", "posted_date", "apply_link", "data_source"]:
-                if not job_data.get(field):
-                    if field == "posted_date":
-                        job_data[field] = datetime.now().date()
-                    else:
-                        job_data[field] = f"Default {field}"
-            
-            # Check if job with this external_job_id already exists
-            existing_job = session.query(Job).filter(
-                Job.external_job_id == job_data['external_job_id']
-            ).first()
-            
-            if existing_job:
-                # Update existing job
-                for key, value in job_data.items():
-                    setattr(existing_job, key, value)
-                updated += 1
-            else:
-                # Insert new job
-                new_job = Job(**job_data)
-                session.add(new_job)
-                inserted += 1
-                
-        # Commit the changes
-        session.commit()
-        return inserted, updated
-    
+        if not job_list:
+            print("No jobs to insert")
+            return 0, 0
+
+        # Delete existing records from same data source
+        delete_count = session.query(Job).filter(Job.data_source == data_source).delete()
+        print(f"Deleted {delete_count} existing records from source: {data_source}")
+
+        job_records = []
+        for raw_job in job_list:
+            job_data = {}
+
+            for col in JOB_COLUMNS:
+                if col in raw_job:
+                    job_data[col] = raw_job[col]
+                elif col == "posted_date":
+                    job_data[col] = datetime.now().date()
+                elif col in ["job_title", "company_name", "apply_link", "data_source"]:
+                    job_data[col] = f"Default {col}"
+                else:
+                    job_data[col] = None
+
+            job_records.append(job_data)
+
+        if job_records:
+            session.bulk_insert_mappings(Job, job_records)
+            session.commit()
+
+        return len(job_records), delete_count
+
     except Exception as e:
         session.rollback()
-        error_message = f"Database upsert failed: {str(e)}\n{traceback.format_exc()}"
-        notify_failure(error_message, "upsert_jobs")
+        error_message = f"Database batch insert failed: {str(e)}\n{traceback.format_exc()}"
+        notify_failure(error_message, "batch_upsert_jobs")
         raise
 
-def get_job_listings(max_workers=5, max_pages=None):
+def get_job_listings(max_workers=30, max_pages=None):
     """Get job listings using parallel processing"""
     job_list = []
     start_time = time.time()
@@ -355,7 +374,7 @@ def get_job_listings(max_workers=5, max_pages=None):
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
             future_to_page = {
                 executor.submit(scrape_page, page_num): page_num 
-                for page_num in range(1, total_pages + 1)
+                for page_num in range(1,  total_pages + 1)
             }
             
             for future in concurrent.futures.as_completed(future_to_page):
@@ -409,8 +428,8 @@ if __name__ == "__main__":
             notify_failure("No job listings returned from scraper", "main")
             exit(1)
         
-        # Upsert job listings to database
-        inserted, updated = upsert_jobs(job_listings, session)
+        # Use batch insert instead of upsert
+        inserted, deleted = batch_upsert_jobs(job_listings, session)
         
         # Also save to CSV for backup
         df = pd.DataFrame(job_listings)
@@ -425,7 +444,7 @@ if __name__ == "__main__":
                 success_message = (
                     f"✅ CV Library scraper completed successfully at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
                     f"Scraped {len(job_listings)} jobs\n"
-                    f"Database: {inserted} new jobs inserted, {updated} jobs updated"
+                    f"Database: {deleted} old jobs deleted, {inserted} new jobs inserted"
                 )
                 send_message(TOKEN, success_message, chat_id)
                 
