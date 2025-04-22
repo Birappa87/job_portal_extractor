@@ -10,10 +10,58 @@ from datetime import datetime
 import os
 import traceback
 import requests
+from sqlalchemy import create_engine, Column, Integer, String, Date, MetaData, Table, inspect, insert, select, update
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.sql.expression import exists
+from datetime import datetime
 
 thread_local = threading.local()
-
 company_list = []
+
+# Define the SQLAlchemy Base
+Base = declarative_base()
+
+# Define the database model
+class Job(Base):
+    __tablename__ = 'jobs'
+    
+    id = Column(Integer, primary_key=True)
+    job_title = Column(String(255), nullable=False)
+    company_name = Column(String(255), nullable=False)
+    company_logo = Column(String, nullable=True)
+    salary = Column(String(100), nullable=True)
+    posted_date = Column(Date, nullable=False)
+    experience = Column(String(100), nullable=True)
+    location = Column(String(255), nullable=True)
+    apply_link = Column(String, nullable=False)
+    data_source = Column(String(180), nullable=False)
+    job_type = Column(String(100), nullable=True)
+    description = Column(String, nullable=True)
+    url = Column(String, nullable=True)
+    country = Column(String(50), nullable=True)
+    ingestion_timestamp = Column(String, nullable=True)
+    external_job_id = Column(String(100), nullable=True, unique=True)
+
+# Database setup function
+def setup_database():
+    """Initialize the database connection and tables"""
+    try:
+        # Create database engine - adjust connection string as needed
+        engine = create_engine('sqlite:///jobs_database.db', echo=False)
+        
+        # Create tables
+        Base.metadata.create_all(engine)
+        
+        # Create session factory
+        Session = sessionmaker(bind=engine)
+        
+        return engine, Session
+    except Exception as e:
+        error_message = f"Failed to set up database: {str(e)}"
+        notify_failure(error_message, "setup_database")
+        raise
 
 def get_chat_id(TOKEN: str) -> str:
     '''Get the chatid for our telegram bot'''
@@ -107,6 +155,29 @@ def get_total_jobs():
         notify_failure(error_message, "get_total_jobs")
         return 0
 
+def parse_date(date_str):
+    """Parse date string using multiple potential formats, handling empty strings"""
+    # Handle empty or None date strings
+    if not date_str or date_str.strip() == '':
+        return datetime.now().date()
+        
+    formats = [
+        "%d/%m/%Y",                 # 19/04/2025
+        "%Y-%m-%dT%H:%M:%SZ",       # 2025-04-19T17:49:01Z
+        "%Y-%m-%d %H:%M:%S",        # 2025-04-19 17:49:01
+        "%Y-%m-%d"                  # 2025-04-19
+    ]
+    
+    for date_format in formats:
+        try:
+            return datetime.strptime(date_str, date_format).date()
+        except ValueError:
+            continue
+    
+    # If all parsing attempts fail, log and return today's date
+    print(f"Failed to parse date '{date_str}' with any known format")
+    return datetime.now().date()
+
 def scrape_page(page_num):
     """Scrape a single page of job listings using a thread-local browser"""
     jobs_on_page = []
@@ -146,13 +217,18 @@ def scrape_page(page_num):
                 job_url = f'https://www.cv-library.co.uk/job/{job_id}' if job_id else ""
                 industry = section_element.get("data-job-industry", "")
 
+                # Ensure job_id is not empty 
+                if not job_id:
+                    # Generate a unique ID using combination of title, company, timestamp
+                    job_id = f"{title}_{company}_{int(time.time())}"
+                
                 company_logo_element = job.select_one("img.job__logo")
                 company_logo = company_logo_element.get("data-src", "") if company_logo_element else ""
 
-                description_tag = soup.select_one('p.job__description')
+                description_tag = job.select_one('p.job__description')
                 description = description_tag.get_text(strip=True) if description_tag else ""
 
-                apply_tag = soup.select_one('a.cvl-btn[href*="/apply"]')
+                apply_tag = job.select_one('a.cvl-btn[href*="/apply"]')
                 apply_link = apply_tag['href'] if apply_tag else ""
 
                 # If the apply link is relative, prepend the base URL
@@ -160,24 +236,38 @@ def scrape_page(page_num):
                 if apply_link and apply_link.startswith("/"):
                     apply_link = base_url + apply_link
 
+                # Ensure apply_link is not empty (required field)
+                if not apply_link:
+                    apply_link = job_url if job_url else base_url
+                    
                 ingestion_time = datetime.utcnow().isoformat()
+
+                # Parse the date posted using our flexible parser
+                posted_date_obj = parse_date(date_posted)
+
+                # Mandatory fields validation
+                if not title:
+                    title = "Untitled Position"
+                if not company:
+                    company = "Unknown Company"
 
                 if company in company_list:
                     jobs_on_page.append({
-                        "title": title,
+                        "job_title": title,
                         "experience": "",
-                        "salary": salary,
-                        "location": location,
-                        "job_type": job_type,
+                        "salary": salary or "Not specified",
+                        "location": location or "Not specified",
+                        "job_type": job_type or "Not specified",
                         "url": job_url,
-                        "company": company,
-                        "description": description,
-                        "posted_date": date_posted,
+                        "company_name": company,
+                        "description": description or "No description available",
+                        "posted_date": posted_date_obj,
                         "company_logo": company_logo,
                         "apply_link": apply_link,
                         "country": "UK",
-                        "source": "cv_library",
-                        "ingestion_timestamp": ingestion_time
+                        "data_source": "cv_library",
+                        "ingestion_timestamp": ingestion_time,
+                        "external_job_id": job_id
                     })
 
             except Exception as e:
@@ -201,6 +291,47 @@ def cleanup_resources():
     except Exception as e:
         error_message = f"Failed to clean up resources: {str(e)}"
         notify_failure(error_message, "cleanup_resources")
+
+def upsert_jobs(job_list, session):
+    """Insert or update job listings in the database"""
+    try:
+        inserted = 0
+        updated = 0
+        
+        for job_data in job_list:
+            # Ensure all required fields have values
+            for field in ["job_title", "company_name", "posted_date", "apply_link", "data_source"]:
+                if not job_data.get(field):
+                    if field == "posted_date":
+                        job_data[field] = datetime.now().date()
+                    else:
+                        job_data[field] = f"Default {field}"
+            
+            # Check if job with this external_job_id already exists
+            existing_job = session.query(Job).filter(
+                Job.external_job_id == job_data['external_job_id']
+            ).first()
+            
+            if existing_job:
+                # Update existing job
+                for key, value in job_data.items():
+                    setattr(existing_job, key, value)
+                updated += 1
+            else:
+                # Insert new job
+                new_job = Job(**job_data)
+                session.add(new_job)
+                inserted += 1
+                
+        # Commit the changes
+        session.commit()
+        return inserted, updated
+    
+    except Exception as e:
+        session.rollback()
+        error_message = f"Database upsert failed: {str(e)}\n{traceback.format_exc()}"
+        notify_failure(error_message, "upsert_jobs")
+        raise
 
 def get_job_listings(max_workers=5, max_pages=None):
     """Get job listings using parallel processing"""
@@ -266,35 +397,36 @@ if __name__ == "__main__":
         if chat_id:
             send_message(TOKEN, f"🚀 CV Library scraper started at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", chat_id)
         
+        # Set up database
+        engine, Session = setup_database()
+        session = Session()
+        
+        # Get company list and scrape jobs
         get_company_list()
         job_listings = get_job_listings(max_workers=30, max_pages=None)
         
         if not job_listings:
             notify_failure("No job listings returned from scraper", "main")
             exit(1)
-            
+        
+        # Upsert job listings to database
+        inserted, updated = upsert_jobs(job_listings, session)
+        
+        # Also save to CSV for backup
         df = pd.DataFrame(job_listings)
         
-        # Select and order columns
-        columns = [
-                "title", "experience", "salary", "location", "job_type",
-                "url", "company", "description", "posted_date", "company_logo", 
-                "apply_link", "country", "source", "ingestion_timestamp"
-            ]
-        
-        # Filter to include only columns that exist in the DataFrame
-        existing_columns = [col for col in columns if col in df.columns]
-        df = df[existing_columns]
-
         # Save data
         try:
-
             os.makedirs('data', exist_ok=True)
             df.to_csv('data/sample_data.csv', index=False)
             
             # Send success notification
             if chat_id:
-                success_message = f"✅ CV Library scraper completed successfully at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\nScraped {len(job_listings)} jobs"
+                success_message = (
+                    f"✅ CV Library scraper completed successfully at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+                    f"Scraped {len(job_listings)} jobs\n"
+                    f"Database: {inserted} new jobs inserted, {updated} jobs updated"
+                )
                 send_message(TOKEN, success_message, chat_id)
                 
         except Exception as e:
@@ -305,3 +437,7 @@ if __name__ == "__main__":
         error_message = f"Critical failure in main: {str(e)}\n{traceback.format_exc()}"
         print(error_message)
         notify_failure(error_message, "main")
+    finally:
+        # Close database session
+        if 'session' in locals():
+            session.close()

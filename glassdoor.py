@@ -9,8 +9,61 @@ import os
 import traceback
 import requests
 from datetime import datetime
+from sqlalchemy import create_engine, Column, Integer, String, Date, MetaData, Table, inspect
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker
+from dateutil import parser
 
 company_list = []
+
+# SQLAlchemy setup
+Base = declarative_base()
+engine = None
+Session = None
+
+# Define the database model - same schema as CV Library scraper
+class Job(Base):
+    __tablename__ = 'jobs'
+    
+    id = Column(Integer, primary_key=True)
+    job_title = Column(String(255), nullable=False)
+    company_name = Column(String(255), nullable=False)
+    company_logo = Column(String, nullable=True)
+    salary = Column(String(100), nullable=True)
+    posted_date = Column(Date, nullable=False)
+    experience = Column(String(100), nullable=True)
+    location = Column(String(255), nullable=True)
+    apply_link = Column(String, nullable=False)
+    data_source = Column(String(180), nullable=False)
+
+def init_db():
+    """Initialize SQLAlchemy engine and create tables if they don't exist"""
+    global engine, Session
+    try:
+        DATABASE_URL = "postgresql://postgres.gncxzrslsmbwyhefawer:tRIOI1iU59gyK1nk@aws-0-eu-west-2.pooler.supabase.com:6543/postgres"
+        
+        # Create SQLAlchemy engine
+        engine = create_engine(DATABASE_URL)
+        Session = sessionmaker(bind=engine)
+        
+        # Check if table exists, create if not
+        inspector = inspect(engine)
+        if not inspector.has_table('jobs'):
+            print("Creating jobs table...")
+            Base.metadata.create_all(engine)
+            print("Table created successfully")
+        else:
+            print("Jobs table already exists")
+            
+        # Test connection
+        with engine.connect() as conn:
+            print("Database connection test successful")
+            
+    except Exception as e:
+        error_message = f"Failed to initialize database: {str(e)}"
+        print(error_message)
+        notify_failure(error_message, "init_db")
+        raise
 
 def get_chat_id(TOKEN: str) -> str:
     """Fetches the chat ID from the latest Telegram bot update."""
@@ -73,6 +126,172 @@ def get_company_list():
         error_message = f"Failed to load company list: {str(e)}"
         notify_failure(error_message, "get_company_list")
         raise
+
+def parse_date(date_str):
+    """Parse date string in various formats to a datetime.date object"""
+    try:
+        if not date_str or date_str == "N/A":
+            return datetime.now().date()
+        
+        # Handle "X days ago" format
+        days_ago_match = re.search(r'(\d+)d ago', date_str)
+        if days_ago_match:
+            days = int(days_ago_match.group(1))
+            return (datetime.now() - pd.Timedelta(days=days)).date()
+            
+        # Handle "Today" and "Just posted"
+        if date_str.lower() in ["today", "just posted"]:
+            return datetime.now().date()
+            
+        # Try parsing the date
+        return parser.parse(date_str).date()
+    except Exception:
+        # If parsing fails, return current date
+        return datetime.now().date()
+
+def insert_jobs_to_db(job_listings):
+    """Insert or update job listings in PostgreSQL database"""
+    if not job_listings:
+        print("No jobs to insert into database")
+        return 0
+    
+    total_count = 0
+    inserted_count = 0
+    updated_count = 0
+    error_count = 0
+    
+    try:
+        print(f"Starting upsert operation for {len(job_listings)} jobs...")
+        
+        # First, check if the table is empty to optimize the process
+        session = Session()
+        try:
+            table_empty = session.query(Job).first() is None
+            print(f"Table status: {'Empty' if table_empty else 'Contains data'}")
+        except Exception as e:
+            print(f"Error checking table status: {str(e)}")
+            table_empty = False  # Assume table has data if we can't check
+        finally:
+            session.close()
+        
+        # Process jobs in smaller batches
+        batch_size = 50
+        for i in range(0, len(job_listings), batch_size):
+            batch = job_listings[i:i+batch_size]
+            session = Session()  # Create a new session for each batch
+            batch_inserted = 0
+            batch_updated = 0
+            
+            try:
+                # If table is empty, we can skip existence checks and just insert everything
+                if table_empty and i == 0:  # Only for the first batch
+                    print("Fast path: Inserting all records into empty table")
+                    for job in batch:
+                        try:
+                            posted_date = parse_date(job.get('posted_date', ''))
+                            
+                            new_job = Job(
+                                job_title=job.get('title', ''),
+                                company_name=job.get('company', ''),
+                                company_logo=job.get('company_logo', ''),
+                                salary=job.get('salary', ''),
+                                posted_date=posted_date,
+                                experience=job.get('experience', ''),
+                                location=job.get('location', ''),
+                                apply_link=job.get('apply_link', ''),
+                                data_source=job.get('source', 'glassdoor')
+                            )
+                            session.add(new_job)
+                            batch_inserted += 1
+                        except Exception as e:
+                            error_count += 1
+                            print(f"Error processing job object: {str(e)}")
+                    
+                    # After first batch, we'll use the standard approach
+                    table_empty = False
+                else:
+                    # Standard approach - check existence for each record
+                    for job in batch:
+                        try:
+                            # Parse the posted date
+                            posted_date = parse_date(job.get('posted_date', ''))
+                            
+                            # Use more explicit query to check if record exists
+                            job_title = job.get('title', '')
+                            company_name = job.get('company', '')
+                            data_source = job.get('source', 'glassdoor')
+                            
+                            # Debug output to see what we're checking for
+                            if i == 0 and batch_inserted + batch_updated < 3:
+                                print(f"Checking for existence: '{job_title}' at '{company_name}' from '{data_source}'")
+                            
+                            # Explicit query with output count for troubleshooting
+                            query = session.query(Job).filter(
+                                Job.job_title == job_title,
+                                Job.company_name == company_name,
+                                Job.data_source == data_source
+                            )
+                            
+                            # Debug the first few queries if needed
+                            if i == 0 and batch_inserted + batch_updated < 3:
+                                count = query.count()
+                                print(f"Found {count} matching records")
+                            
+                            existing_job = query.first()
+                            
+                            if existing_job:
+                                # Update existing record
+                                existing_job.company_logo = job.get('company_logo', '')
+                                existing_job.salary = job.get('salary', '')
+                                existing_job.posted_date = posted_date
+                                existing_job.experience = job.get('experience', '')
+                                existing_job.location = job.get('location', '')
+                                existing_job.apply_link = job.get('apply_link', '')
+                                batch_updated += 1
+                            else:
+                                # Create new Job object
+                                new_job = Job(
+                                    job_title=job_title,
+                                    company_name=company_name,
+                                    company_logo=job.get('company_logo', ''),
+                                    salary=job.get('salary', ''),
+                                    posted_date=posted_date,
+                                    experience=job.get('experience', ''),
+                                    location=job.get('location', ''),
+                                    apply_link=job.get('apply_link', ''),
+                                    data_source=data_source
+                                )
+                                session.add(new_job)
+                                batch_inserted += 1
+                            
+                        except Exception as e:
+                            error_count += 1
+                            print(f"Error processing job object: {str(e)}")
+                            # Continue processing other jobs in the batch
+                
+                # Commit the batch
+                session.commit()
+                inserted_count += batch_inserted
+                updated_count += batch_updated
+                total_count += batch_inserted + batch_updated
+                print(f"Batch completed: {batch_inserted} inserted, {batch_updated} updated")
+                
+            except Exception as e:
+                error_message = f"Database batch upsert error: {str(e)}"
+                print(error_message)
+                notify_failure(error_message, "insert_jobs_to_db_batch")
+                session.rollback()  # Important: roll back the transaction
+            finally:
+                session.close()  # Always close the session
+        
+        print(f"Database operation completed: {inserted_count} new jobs inserted, {updated_count} jobs updated, {error_count} errors")
+        
+    except Exception as e:
+        error_message = f"Database upsert error: {str(e)}"
+        print(error_message)
+        notify_failure(error_message, "insert_jobs_to_db")
+    
+    return total_count
 
 def extract_data(content, region):
     """Extracts job data from Glassdoor page HTML."""
@@ -169,6 +388,11 @@ def main():
         chat_id = get_chat_id(TOKEN)
         if chat_id:
             send_message(TOKEN, f"🚀 Glassdoor scraper started at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", chat_id)
+        
+        # Initialize database
+        init_db()
+        
+        # Get company list
         get_company_list()
 
         urls = {
@@ -264,25 +488,31 @@ def main():
                 notify_failure(error_message, "data_collection")
                 return
 
+            # Save to JSON file
             with open("glassdoor_all_uk.json", "w+", encoding="utf-8") as final_file:
                 json.dump(all_data, final_file, indent=2)
 
+            # Save to CSV file
             df = pd.DataFrame(all_data)
-
             columns = [
                 "title", "experience", "salary", "location", "job_type",
                 "url", "company", "description", "posted_date", "company_logo", 
                 "apply_link", "country", "source", "ingestion_timestamp"
             ]
-
             existing_columns = [col for col in columns if col in df.columns]
             df = df[existing_columns]
-
             os.makedirs("data", exist_ok=True)
             df.to_csv('data/glassdoor_data.csv', index=False)
+            
+            # Insert jobs into database
+            inserted_count = insert_jobs_to_db(all_data)
 
             if chat_id:
-                success_message = f"✅ Glassdoor scraper completed successfully at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\nScraped {len(all_data)} jobs across {len(urls)} UK regions"
+                success_message = (
+                    f"✅ Glassdoor scraper completed successfully at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+                    f"Scraped {len(all_data)} jobs across {len(urls)} UK regions\n"
+                    f"Inserted {inserted_count} jobs into database"
+                )
                 send_message(TOKEN, success_message, chat_id)
 
         except Exception as e:
