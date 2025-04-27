@@ -5,7 +5,13 @@ import json
 import logging
 import re
 import pandas as pd
+import os
+import traceback
 from datetime import datetime
+from sqlalchemy import create_engine, Column, Integer, String, Date, Text, inspect
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker
+from dateutil import parser
 
 # Configure logging
 logging.basicConfig(
@@ -26,10 +32,59 @@ PARAMS = {
 }
 OUTPUT_FILE = "nhs_jobs.json"
 
+# SQLAlchemy setup
+Base = declarative_base()
+engine = None
+Session = None
+
+# Define the database model - Using Text type for potentially large fields
+class Job(Base):
+    __tablename__ = 'jobs'
+    
+    id = Column(Integer, primary_key=True)
+    job_title = Column(String(255), nullable=False)
+    company_name = Column(String(255), nullable=False)
+    company_logo = Column(Text, nullable=True)  # Changed to Text type
+    salary = Column(String(100), nullable=True)
+    posted_date = Column(Text, nullable=False)
+    experience = Column(String(100), nullable=True)
+    location = Column(String(255), nullable=True)
+    apply_link = Column(Text, nullable=False)  # Changed to Text type
+    data_source = Column(String(180), nullable=False)
+
 # Telegram setup
 TOKEN = '7844666863:AAF0fTu1EqWC1v55oC25TVzSjClSuxkO2X4'
 chat_id = None
 company_list = []
+
+def init_db():
+    """Initialize SQLAlchemy engine and create tables if they don't exist"""
+    global engine, Session
+    try:
+        DATABASE_URL = "postgresql://postgres.gncxzrslsmbwyhefawer:tRIOI1iU59gyK1nk@aws-0-eu-west-2.pooler.supabase.com:6543/postgres"
+        
+        # Create SQLAlchemy engine
+        engine = create_engine(DATABASE_URL)
+        Session = sessionmaker(bind=engine)
+        
+        # Check if table exists
+        inspector = inspect(engine)
+        if not inspector.has_table('jobs'):
+            logger.info("Creating jobs table...")
+            Base.metadata.create_all(engine)
+            logger.info("Table created successfully")
+        else:
+            logger.info("Jobs table already exists")
+            
+        # Test connection
+        with engine.connect() as conn:
+            logger.info("Database connection test successful")
+            
+    except Exception as e:
+        error_message = f"Failed to initialize database: {str(e)}"
+        logger.error(error_message)
+        notify_failure(error_message, "init_db")
+        raise
 
 def get_chat_id(TOKEN: str) -> str:
     """Fetches the chat ID from the latest Telegram bot update."""
@@ -65,19 +120,6 @@ def notify_failure(error_message, location="Unknown"):
         message = f"❌ NHS JOBS SCRAPER FAILURE at {timestamp}\nLocation: {location}\nError: {error_message}"
         send_message(TOKEN, message, chat_id)
 
-def notify_success(stats):
-    """Sends a success notification to Telegram."""
-    global chat_id, TOKEN
-    if chat_id is None:
-        chat_id = get_chat_id(TOKEN)
-    if chat_id:
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        message = f"✅ NHS JOBS SCRAPER SUCCESS at {timestamp}\n"
-        message += f"Total jobs scraped: {stats['total']}\n"
-        message += f"Matched companies: {stats['matched']}\n"
-        message += f"Saved to: {OUTPUT_FILE}"
-        send_message(TOKEN, message, chat_id)
-
 def clean_name(name):
     """Cleans a company name for matching."""
     try:
@@ -107,19 +149,122 @@ def is_matching_company(employer):
     """Checks if the employer matches any company in our target list."""
     try:
         clean_employer = clean_name(employer)
-        for company in company_list:
-            if company in clean_employer or clean_employer in company:
-                return True
+        if clean_employer in company_list:
+            return True
         return False
     except Exception as e:
         error_message = f"Failed to check company match: {str(e)}"
         notify_failure(error_message, "is_matching_company")
         return False
 
+def parse_date(date_str):
+    """Parse date string in various formats to a datetime.date object"""
+    try:
+        if not date_str or date_str == "N/A" or date_str == "Not specified" or date_str == "Invalid date format":
+            return datetime.now().date()
+        
+        # Handle "X days ago" format
+        days_ago_match = re.search(r'(\d+)d ago', date_str)
+        if days_ago_match:
+            days = int(days_ago_match.group(1))
+            return (datetime.now() - pd.Timedelta(days=days)).date()
+            
+        # Handle "Today" and "Just posted"
+        if date_str.lower() in ["today", "just posted"]:
+            return datetime.now().date()
+            
+        # Handle date strings in "dd/mm/yyyy" format
+        if "/" in date_str:
+            parts = date_str.split("/")
+            if len(parts) == 3:
+                day, month, year = map(int, parts)
+                return datetime(year, month, day).date()
+        
+        # Try parsing with dateutil parser as fallback
+        return parser.parse(date_str).date()
+    except Exception:
+        # If parsing fails, return current date
+        return datetime.now().date()
+
+def truncate_string(text, max_length):
+    """Safely truncate a string to specified maximum length."""
+    if text and len(text) > max_length:
+        return text[:max_length-3] + "..."
+    return text
+
+def insert_jobs_to_db(job_listings):
+    """Delete all jobs with data_source='nhs' and insert new jobs"""
+    if not job_listings:
+        logger.info("No jobs to insert into database")
+        return 0
+    
+    inserted_count = 0
+    
+    try:
+        session = Session()
+        try:
+            # Delete all existing records with data_source='nhs'
+            logger.info("Deleting all existing NHS jobs from database...")
+            deleted_count = session.query(Job).filter(Job.data_source == 'nhs').delete()
+            logger.info(f"Deleted {deleted_count} existing NHS jobs")
+            
+            # Insert new records
+            logger.info(f"Inserting {len(job_listings)} new jobs...")
+            for job in job_listings:
+                try:
+                    # Parse the posted date
+                    posted_date = parse_date(job.get('posting_date', ''))
+                    
+                    # Truncate strings to fit database columns
+                    job_title = truncate_string(job.get('title', ''), 255)
+                    company_name = truncate_string(job.get('employer', ''), 255)
+                    salary = truncate_string(job.get('salary', ''), 100)
+                    experience = truncate_string(f"{job.get('job_type', '')} - {job.get('contract_type', '')}", 100)
+                    location = truncate_string(job.get('location', ''), 255)
+
+                    if ('hour' in salary.lower()) or ('day' in salary.lower()):
+                        continue
+
+                    new_job = Job(
+                        job_title=job_title,
+                        company_name=company_name,
+                        company_logo='',
+                        salary=salary,
+                        posted_date=posted_date,
+                        experience=experience,
+                        location=location,
+                        apply_link=job.get('url', ''),
+                        data_source='nhs'
+                    )
+                    
+                    session.add(new_job)
+                    inserted_count += 1
+                except Exception as e:
+                    logger.error(f"Error processing job object: {str(e)}")
+            
+            # Commit the changes
+            session.commit()
+            logger.info(f"Successfully inserted {inserted_count} new jobs")
+            
+        except Exception as e:
+            error_message = f"Database operation error: {str(e)}"
+            logger.error(error_message)
+            notify_failure(error_message, "insert_jobs_to_db")
+            session.rollback()
+        finally:
+            session.close()
+    except Exception as e:
+        error_message = f"Database session error: {str(e)}"
+        logger.error(error_message)
+        notify_failure(error_message, "insert_jobs_to_db")
+    
+    return inserted_count
+
 def scrape_all_pages():
     """Scrape all pages of job listings from the NHS jobs website."""
     all_jobs = []
     page = 1
+    matched_jobs = []
     
     logger.info("Starting to scrape NHS job listings")
     while True:
@@ -140,6 +285,12 @@ def scrape_all_pages():
             
             logger.info(f"Found {len(jobs)} jobs on page {page}")
             all_jobs.extend(jobs)
+            
+            # Filter for target companies
+            for job in jobs:
+                if job.get('is_target_company', False):
+                    matched_jobs.append(job)
+            
             page += 1
             
         except requests.RequestException as e:
@@ -148,8 +299,10 @@ def scrape_all_pages():
             notify_failure(error_message, f"scrape_all_pages (page {page})")
             break
     
-    logger.info(f"Total jobs scraped: {len(all_jobs)}")
-    return all_jobs
+    all_jobs_count = len(all_jobs)
+    matched_jobs_count = len(matched_jobs)
+    logger.info(f"Total jobs scraped: {all_jobs_count}, Matching target companies: {matched_jobs_count}")
+    return all_jobs, matched_jobs
 
 def parse_jobs(soup):
     """Parse job listings from a BeautifulSoup object."""
@@ -173,44 +326,31 @@ def parse_jobs(soup):
             employer = employer_element.contents[0].strip() if employer_element else "Unknown Employer"
             
             # Check if this employer matches our company list
-            is_target_company = is_matching_company(employer)
+            clean_employer = clean_name(employer)
+            is_target_company = clean_employer in company_list
             
             location_element = job.find('div', class_='location-font-size')
             location = location_element.text.strip() if location_element else "Unknown Location"
             
             salary_element = job.find('li', {'data-test': 'search-result-salary'})
-            salary = "Not specified"
+            salary = "N/A"
             if salary_element:
                 salary = salary_element.text.strip().replace('Salary:', '').strip()
                 salary = salary.split('a year')[0].strip()
             
-            closing_date_str = "Not specified"
             closing_date_element = job.find('li', {'data-test': 'search-result-closingDate'})
-            days_until_closing = None
-            
+            closing_date_str = "N/A"
             if closing_date_element:
                 closing_date_str = closing_date_element.text.strip().replace('Closing date:', '').strip()
-                try:
-                    closing_date = datetime.strptime(closing_date_str, '%d %B %Y').date()
-                    closing_date_str = closing_date.strftime('%d/%m/%Y')
-                    days_until_closing = (closing_date - current_date).days
-                except ValueError:
-                    closing_date_str = "Invalid date format"
             
-            posting_date_str = "Not specified"
             posting_date_element = job.find('li', {'data-test': 'search-result-publicationDate'})
-            
+            posting_date_str = "N/A"
             if posting_date_element:
                 posting_date_str = posting_date_element.text.strip().replace('Date posted:', '').strip()
-                try:
-                    posting_date = datetime.strptime(posting_date_str, '%d %B %Y').date()
-                    posting_date_str = posting_date.strftime('%d/%m/%Y')
-                except ValueError:
-                    posting_date_str = "Invalid date format"
             
-            job_id = None
-            job_type = "Not specified"
-            contract_type = "Not specified"
+            job_id = "N/A"
+            job_type = "N/A"
+            contract_type = "N/A"
             
             job_id_element = job.find('span', {'data-test': 'search-result-jobId'})
             if job_id_element:
@@ -224,21 +364,28 @@ def parse_jobs(soup):
             if contract_type_element:
                 contract_type = contract_type_element.text.strip().replace('Contract type:', '').strip()
             
-            jobs.append({
+            ingestion_time = datetime.utcnow().isoformat()
+            
+            job_data = {
                 'title': title,
                 'url': url,
                 'employer': employer,
                 'location': location,
                 'salary': salary,
                 'closing_date': closing_date_str,
-                'days_until_closing': days_until_closing,
                 'posting_date': posting_date_str,
                 'job_id': job_id,
                 'job_type': job_type,
                 'contract_type': contract_type,
                 'is_target_company': is_target_company,
-                'scraped_date': datetime.now().strftime('%d/%m/%Y %H:%M:%S')
-            })
+                'apply_link': url,
+                'company_logo': '',
+                'source': 'nhs',
+                'country': 'UK',
+                'ingestion_timestamp': ingestion_time
+            }
+            
+            jobs.append(job_data)
             
         except Exception as e:
             error_message = f"Error parsing job: {str(e)}"
@@ -251,7 +398,7 @@ def save_to_json(jobs):
     """Save the scraped jobs to a JSON file."""
     try:
         with open(OUTPUT_FILE, 'w', encoding='utf-8') as f:
-            json.dump(jobs, f, indent=4, ensure_ascii=False)
+            json.dump(jobs, f, indent=2, ensure_ascii=False)
         logger.info(f"Successfully saved {len(jobs)} jobs to {OUTPUT_FILE}")
         return True
     except Exception as e:
@@ -260,54 +407,79 @@ def save_to_json(jobs):
         notify_failure(error_message, "save_to_json")
         return False
 
+def save_to_csv(jobs):
+    """Save the scraped jobs to a CSV file."""
+    try:
+        df = pd.DataFrame(jobs)
+        columns = [
+            "title", "job_type", "salary", "location", "contract_type",
+            "url", "employer", "posting_date", "closing_date", "company_logo", 
+            "apply_link", "country", "source", "ingestion_timestamp", "job_id"
+        ]
+        existing_columns = [col for col in columns if col in df.columns]
+        df = df[existing_columns]
+        os.makedirs("data", exist_ok=True)
+        df.to_csv('data/nhs_data.csv', index=False)
+        logger.info(f"Successfully saved {len(jobs)} jobs to CSV")
+        return True
+    except Exception as e:
+        error_message = f"Error saving jobs to CSV file: {str(e)}"
+        logger.error(error_message)
+        notify_failure(error_message, "save_to_csv")
+        return False
+
 def main():
     """Main function to run the scraper."""
-    global chat_id
+    global chat_id, TOKEN
     logger.info("Starting NHS job scraper...")
     
     try:
         # Get Telegram chat ID
         chat_id = get_chat_id(TOKEN)
+        if chat_id:
+            send_message(TOKEN, f"🚀 NHS scraper started at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", chat_id)
+        
+        # Initialize database
+        init_db()
         
         # Load company list
         get_company_list()
         
         # Scrape all job listings
-        jobs = scrape_all_pages()
+        all_jobs, matched_jobs = scrape_all_pages()
         
-        # Track matched companies
-        matched_jobs = [job for job in jobs if job.get('is_target_company', False)]
-        
-        # Save the results to a JSON file
-        if jobs:
-            save_to_json(jobs)
+        try:
+            if len(all_jobs) == 0:
+                error_message = "No jobs collected from NHS site"
+                logger.error(error_message)
+                notify_failure(error_message, "data_collection")
+                return
             
-            # Send success notification
-            stats = {
-                'total': len(jobs),
-                'matched': len(matched_jobs)
-            }
-            notify_success(stats)
+            # Save to JSON file
+            save_to_json(all_jobs)
             
-            # Print a sample of the scraped jobs
-            logger.info("\nSample of scraped jobs:")
-            for job in jobs[:3]:  # Print only the first 3 jobs as a sample
-                logger.info(f"Title: {job['title']}")
-                logger.info(f"Employer: {job['employer']}")
-                logger.info(f"Location: {job['location']}")
-                logger.info(f"Salary: {job['salary']}")
-                logger.info(f"Closing Date: {job['closing_date']}")
-                logger.info(f"Target Company: {'Yes' if job.get('is_target_company', False) else 'No'}")
-                logger.info("---")
+            # Save to CSV file
+            save_to_csv(all_jobs)
+            
+            # Insert jobs into database
+            inserted_count = insert_jobs_to_db(matched_jobs)
+            
+            if chat_id:
+                success_message = (
+                    f"✅ NHS scraper completed successfully at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+                    f"Scraped {len(all_jobs)} jobs\n"
+                    f"Matched {len(matched_jobs)} jobs with target companies\n"
+                    f"Inserted {inserted_count} jobs into database"
+                )
+                send_message(TOKEN, success_message, chat_id)
                 
-            logger.info(f"\nTotal jobs scraped: {len(jobs)}")
-            logger.info(f"Matched companies: {len(matched_jobs)}")
-        else:
-            logger.info("No jobs were found.")
-            notify_failure("No jobs were found.", "main")
+        except Exception as e:
+            error_message = f"Failed to save data: {str(e)}\n{traceback.format_exc()}"
+            logger.error(error_message)
+            notify_failure(error_message, "data_saving")
             
     except Exception as e:
-        error_message = f"Critical error in main function: {str(e)}"
+        error_message = f"Critical failure in main: {str(e)}\n{traceback.format_exc()}"
         logger.error(error_message)
         notify_failure(error_message, "main")
 

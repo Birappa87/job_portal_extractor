@@ -1,40 +1,37 @@
-from playwright.sync_api import sync_playwright
-from bs4 import BeautifulSoup
-import time
-import random
-import json
+import requests
 import pandas as pd
 import re
-import os
-import traceback
-import requests
+import json
+import time
 from datetime import datetime
-from sqlalchemy import create_engine, Column, Integer, String, Date, MetaData, Table, inspect
+from sqlalchemy import create_engine, Column, Integer, String, Text, inspect
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
-from dateutil import parser
 
-company_list = []
-
-# SQLAlchemy setup
 Base = declarative_base()
-engine = None
-Session = None
 
-# Define the database model - same schema as CV Library scraper
 class Job(Base):
     __tablename__ = 'jobs'
     
     id = Column(Integer, primary_key=True)
     job_title = Column(String(255), nullable=False)
     company_name = Column(String(255), nullable=False)
-    company_logo = Column(String, nullable=True)
+    company_logo = Column(Text, nullable=True)
     salary = Column(String(100), nullable=True)
-    posted_date = Column(Date, nullable=False)
+    posted_date = Column(Text, nullable=False)
     experience = Column(String(100), nullable=True)
     location = Column(String(255), nullable=True)
-    apply_link = Column(String, nullable=False)
+    apply_link = Column(Text, nullable=False)
+    description = Column(Text, nullable=True)
     data_source = Column(String(180), nullable=False)
+
+# Global variables
+TOKEN = '7844666863:AAF0fTu1EqWC1v55oC25TVzSjClSuxkO2X4'
+chat_id = None
+engine = None
+Session = None
+company_list = []
+
 
 def init_db():
     """Initialize SQLAlchemy engine and create tables if they don't exist"""
@@ -89,9 +86,6 @@ def send_message(TOKEN: str, message: str, chat_id: str):
     except Exception as e:
         print(f"Failed to send message: {e}")
 
-TOKEN = '7844666863:AAF0fTu1EqWC1v55oC25TVzSjClSuxkO2X4'
-chat_id = None
-
 def notify_failure(error_message, location="Unknown"):
     """Sends a failure notification to Telegram."""
     global chat_id, TOKEN
@@ -100,6 +94,16 @@ def notify_failure(error_message, location="Unknown"):
     if chat_id:
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         message = f"❌ GLASSDOOR SCRAPER FAILURE at {timestamp}\nLocation: {location}\nError: {error_message}"
+        send_message(TOKEN, message, chat_id)
+
+def notify_success(message):
+    """Sends a success notification to Telegram."""
+    global chat_id, TOKEN
+    if chat_id is None:
+        chat_id = get_chat_id(TOKEN)
+    if chat_id:
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        message = f"✅ GLASSDOOR SCRAPER SUCCESS at {timestamp}\n{message}"
         send_message(TOKEN, message, chat_id)
 
 def clean_name(name):
@@ -127,401 +131,362 @@ def get_company_list():
         notify_failure(error_message, "get_company_list")
         raise
 
-def parse_date(date_str):
-    """Parse date string in various formats to a datetime.date object"""
-    try:
-        if not date_str or date_str == "N/A":
-            return datetime.now().date()
-        
-        # Handle "X days ago" format
-        days_ago_match = re.search(r'(\d+)d ago', date_str)
-        if days_ago_match:
-            days = int(days_ago_match.group(1))
-            return (datetime.now() - pd.Timedelta(days=days)).date()
-            
-        # Handle "Today" and "Just posted"
-        if date_str.lower() in ["today", "just posted"]:
-            return datetime.now().date()
-            
-        # Try parsing the date
-        return parser.parse(date_str).date()
-    except Exception:
-        # If parsing fails, return current date
-        return datetime.now().date()
-
-def insert_jobs_to_db(job_listings):
-    """Insert or update job listings in PostgreSQL database"""
-    if not job_listings:
-        print("No jobs to insert into database")
-        return 0
+def insert_jobs_to_db(jobs_data):
+    """Insert scraped jobs into the database."""
+    if not engine:
+        init_db()
     
-    total_count = 0
-    inserted_count = 0
-    updated_count = 0
-    error_count = 0
-    
+    session = Session()
     try:
-        print(f"Starting upsert operation for {len(job_listings)} jobs...")
+        count = 0
+        for job_data in jobs_data:
+            job = Job(
+                job_title=job_data.get('job_title', ''),
+                company_name=job_data.get('company_name', ''),
+                company_logo=job_data.get('company_logo', None),
+                salary=str(job_data.get('salary')) if job_data.get('salary') else None,
+                posted_date=job_data.get('posted_date', ''),
+                experience=job_data.get('experience', None),
+                location=job_data.get('location', ''),
+                apply_link=job_data.get('apply_link', ''),
+                description=job_data.get('description', None),
+                data_source=job_data.get('data_source', 'glassdoor')
+            )
+            session.add(job)
+            count += 1
         
-        # First, check if the table is empty to optimize the process
-        session = Session()
-        try:
-            table_empty = session.query(Job).first() is None
-            print(f"Table status: {'Empty' if table_empty else 'Contains data'}")
-        except Exception as e:
-            print(f"Error checking table status: {str(e)}")
-            table_empty = False  # Assume table has data if we can't check
-        finally:
-            session.close()
-        
-        # Process jobs in smaller batches
-        batch_size = 50
-        for i in range(0, len(job_listings), batch_size):
-            batch = job_listings[i:i+batch_size]
-            session = Session()  # Create a new session for each batch
-            batch_inserted = 0
-            batch_updated = 0
-            
-            try:
-                # If table is empty, we can skip existence checks and just insert everything
-                if table_empty and i == 0:  # Only for the first batch
-                    print("Fast path: Inserting all records into empty table")
-                    for job in batch:
-                        try:
-                            posted_date = parse_date(job.get('posted_date', ''))
-                            
-                            new_job = Job(
-                                job_title=job.get('title', ''),
-                                company_name=job.get('company', ''),
-                                company_logo=job.get('company_logo', ''),
-                                salary=job.get('salary', ''),
-                                posted_date=posted_date,
-                                experience=job.get('experience', ''),
-                                location=job.get('location', ''),
-                                apply_link=job.get('apply_link', ''),
-                                data_source=job.get('source', 'glassdoor')
-                            )
-                            session.add(new_job)
-                            batch_inserted += 1
-                        except Exception as e:
-                            error_count += 1
-                            print(f"Error processing job object: {str(e)}")
-                    
-                    # After first batch, we'll use the standard approach
-                    table_empty = False
-                else:
-                    # Standard approach - check existence for each record
-                    for job in batch:
-                        try:
-                            # Parse the posted date
-                            posted_date = parse_date(job.get('posted_date', ''))
-                            
-                            # Use more explicit query to check if record exists
-                            job_title = job.get('title', '')
-                            company_name = job.get('company', '')
-                            data_source = job.get('source', 'glassdoor')
-                            
-                            # Debug output to see what we're checking for
-                            if i == 0 and batch_inserted + batch_updated < 3:
-                                print(f"Checking for existence: '{job_title}' at '{company_name}' from '{data_source}'")
-                            
-                            # Explicit query with output count for troubleshooting
-                            query = session.query(Job).filter(
-                                Job.job_title == job_title,
-                                Job.company_name == company_name,
-                                Job.data_source == data_source
-                            )
-                            
-                            # Debug the first few queries if needed
-                            if i == 0 and batch_inserted + batch_updated < 3:
-                                count = query.count()
-                                print(f"Found {count} matching records")
-                            
-                            existing_job = query.first()
-                            
-                            if existing_job:
-                                # Update existing record
-                                existing_job.company_logo = job.get('company_logo', '')
-                                existing_job.salary = job.get('salary', '')
-                                existing_job.posted_date = posted_date
-                                existing_job.experience = job.get('experience', '')
-                                existing_job.location = job.get('location', '')
-                                existing_job.apply_link = job.get('apply_link', '')
-                                batch_updated += 1
-                            else:
-                                # Create new Job object
-                                new_job = Job(
-                                    job_title=job_title,
-                                    company_name=company_name,
-                                    company_logo=job.get('company_logo', ''),
-                                    salary=job.get('salary', ''),
-                                    posted_date=posted_date,
-                                    experience=job.get('experience', ''),
-                                    location=job.get('location', ''),
-                                    apply_link=job.get('apply_link', ''),
-                                    data_source=data_source
-                                )
-                                session.add(new_job)
-                                batch_inserted += 1
-                            
-                        except Exception as e:
-                            error_count += 1
-                            print(f"Error processing job object: {str(e)}")
-                            # Continue processing other jobs in the batch
-                
-                # Commit the batch
-                session.commit()
-                inserted_count += batch_inserted
-                updated_count += batch_updated
-                total_count += batch_inserted + batch_updated
-                print(f"Batch completed: {batch_inserted} inserted, {batch_updated} updated")
-                
-            except Exception as e:
-                error_message = f"Database batch upsert error: {str(e)}"
-                print(error_message)
-                notify_failure(error_message, "insert_jobs_to_db_batch")
-                session.rollback()  # Important: roll back the transaction
-            finally:
-                session.close()  # Always close the session
-        
-        print(f"Database operation completed: {inserted_count} new jobs inserted, {updated_count} jobs updated, {error_count} errors")
-        
+        session.commit()
+        print(f"Successfully inserted {count} jobs into the database")
+        notify_success(f"Successfully inserted {count} jobs into the database")
+        return count
     except Exception as e:
-        error_message = f"Database upsert error: {str(e)}"
+        session.rollback()
+        error_message = f"Failed to insert jobs: {str(e)}"
         print(error_message)
         notify_failure(error_message, "insert_jobs_to_db")
+        raise
+    finally:
+        session.close()
+
+def delete_jobs_by_source(source="Glassdoor"):
+    """Delete jobs by data source."""
+    if not engine:
+        init_db()
     
-    return total_count
-
-def extract_data(content, region):
-    """Extracts job data from Glassdoor page HTML."""
+    session = Session()
     try:
-        soup = BeautifulSoup(content, 'html.parser')
-        job_element = soup.find('ul', class_='JobsList_jobsList__lqjTr')
-        if not job_element:
-            print("No job list found.")
-            notify_failure(f"No job list found in {region}", "extract_data")
-            return []
-
-        job_cards = job_element.find_all('li', class_='JobsList_jobListItem__wjTHv')
-        print(f"Total Jobs Extracted: {len(job_cards)}\n")
-
-        all_jobs = []
-        
-        for job in job_cards:
-            try:
-                job_card_wrapper = job.find('div', class_='JobCard_jobCardWrapper__vX29z')
-                if not job_card_wrapper:
-                    continue
-                
-                title_element = job_card_wrapper.find('a', class_='JobCard_jobTitle__GLyJ1')
-                if not title_element:
-                    continue
-                
-                title = title_element.get_text(strip=True)
-                job_url = title_element.get('href', '')
-                if not job_url.startswith("http"):
-                    job_url = f"https://www.glassdoor.co.uk{job_url}"
-
-                company_element = job_card_wrapper.find('span', class_='EmployerProfile_compactEmployerName__9MGcV')
-                company = company_element.get_text(strip=True) if company_element else "N/A"
-
-                location_element = job_card_wrapper.find('div', class_='JobCard_location__Ds1fM')
-                location = location_element.get_text(strip=True) if location_element else "N/A"
-
-                salary_element = job_card_wrapper.find('div', class_='JobCard_salaryEstimate__QpbTW')
-                salary = salary_element.get_text(strip=True) if salary_element else "N/A"
-
-                date_posted_element = job_card_wrapper.find('div', class_='JobCard_listingAge__jJsuc')
-                date_posted = date_posted_element.get_text(strip=True) if date_posted_element else "N/A"
-
-                job_type = "Easy Apply" if job_card_wrapper.find('div', class_='JobCard_easyApplyTag__5vlo5') else "Standard"
-
-                logo_container = job_card_wrapper.find('div', class_='EmployerProfile_profileContainer__63w3R')
-                company_logo = "N/A"
-                if logo_container:
-                    img_element = logo_container.find('img', class_='avatar-base_Image__2RcF9')
-                    if img_element:
-                        company_logo = img_element.get('src', 'N/A')
-
-                description_element = job_card_wrapper.find('div', class_='JobCard_jobDescriptionSnippet__l1tnl')
-                description = description_element.get_text(strip=True) if description_element else ""
-                description = description.replace('&hellip;', '...')
-
-                cleaned_company = clean_name(company)
-                if cleaned_company in company_list:
-                    ingestion_time = datetime.utcnow().isoformat()
-                    
-                    job_data = {
-                        "title": title,
-                        "experience": "",
-                        "salary": salary,
-                        "location": location,
-                        "job_type": job_type,
-                        "url": job_url,
-                        "company": company,
-                        "description": description,
-                        "posted_date": date_posted,
-                        "company_logo": company_logo,
-                        "apply_link": job_url,
-                        "country": "UK",
-                        "source": "glassdoor",
-                        "ingestion_timestamp": ingestion_time,
-                        "region": region
-                    }
-
-                    all_jobs.append(job_data)
-            except Exception as e:
-                continue
-
-        print(f"✅ Total jobs collected from {region}: {len(all_jobs)}\n")
-        return all_jobs
+        count = session.query(Job).filter(Job.data_source == source).delete()
+        session.commit()
+        print(f"Successfully deleted {count} jobs with source '{source}'")
+        notify_success(f"Successfully deleted {count} jobs with source '{source}'")
+        return count
     except Exception as e:
-        error_message = f"Failed to extract data: {str(e)}"
-        notify_failure(error_message, f"extract_data({region})")
+        session.rollback()
+        error_message = f"Failed to delete jobs: {str(e)}"
+        print(error_message)
+        notify_failure(error_message, "delete_jobs_by_source")
+        raise
+    finally:
+        session.close()
+
+def extract_external_url(cookies, headers, queryString):
+    """Extract external URL from Glassdoor."""
+    try:
+        json_data = [
+            {
+                'operationName': 'SerpRedirectorQuery',
+                'variables': {
+                    'baseUrl': 'www.glassdoor.co.uk',
+                    'queryString': f'{queryString}',
+                },
+                'query': 'mutation SerpRedirectorQuery($applyData: ApplyDataInput, $baseUrl: String!, $queryString: String!) {\n  redirector(\n    redirectorContextInput: {applyData: $applyData, baseUrl: $baseUrl, queryString: $queryString}\n  ) {\n    redirectUrl\n    __typename\n  }\n}\n',
+            },
+        ]
+
+        response = requests.post('https://www.glassdoor.co.uk/graph', cookies=cookies, headers=headers, json=json_data)
+
+        result = response.json()
+        if response.status_code == 200:
+            url = result[0]['data']['redirector']['redirectUrl']
+        else:
+            url = None
+        
+        return url
+    except Exception as e:
+        error_message = f"Failed to extract external URL: {str(e)}"
+        print(error_message)
+        notify_failure(error_message, "extract_external_url")
+        return None
+
+def extract_description(cookies, headers, jobSearchTrackingKey, jl, queryString):
+    """Extract job description from Glassdoor."""
+    try:
+        json_data = [
+        {
+            'operationName': 'uilTrackingMutation',
+            'variables': {
+                'events': [
+                    {
+                        'eventType': 'JAVASCRIPT_DETECTION',
+                        'jobSearchTrackingKey': jobSearchTrackingKey,
+                        'pageType': 'SERP',
+                    },
+                ],
+            },
+            'query': 'mutation uilTrackingMutation($events: [EventContextInput]!) {\n  trackEvents(events: $events) {\n    eventType\n    resultStatus\n    message\n    clickId\n    clickGuid\n    __typename\n  }\n}\n',
+        },
+        {
+            'operationName': 'JobDetailQuery',
+            'variables': {
+                'enableReviewSummary': True,
+                'jl': jl,
+                'queryString': queryString,
+                'pageTypeEnum': 'SERP',
+                'countryId': 2,
+            },
+            'query': 'query JobDetailQuery($jl: Long!, $queryString: String, $enableReviewSummary: Boolean!, $pageTypeEnum: PageTypeEnum, $countryId: Int) {\n  jobview: jobView(\n    listingId: $jl\n    contextHolder: {queryString: $queryString, pageTypeEnum: $pageTypeEnum}\n  ) {\n    ...JobDetailsFragment\n    employerReviewSummary @include(if: $enableReviewSummary) {\n      reviewSummary {\n        highlightSummary {\n          sentiment\n          sentence\n          categoryReviewCount\n          __typename\n        }\n        __typename\n      }\n      __typename\n    }\n    __typename\n  }\n}\n\nfragment JobDetailsFragment on JobView {\n  employerBenefits {\n    benefitsOverview {\n      benefitsHighlights {\n        benefit {\n          commentCount\n          icon\n          name\n          __typename\n        }\n        highlightPhrase\n        __typename\n      }\n      overallBenefitRating\n      employerBenefitSummary {\n        comment\n        __typename\n      }\n      __typename\n    }\n    benefitReviews {\n      benefitComments {\n        id\n        comment\n        __typename\n      }\n      cityName\n      createDate\n      currentJob\n      rating\n      stateName\n      userEnteredJobTitle\n      __typename\n    }\n    numReviews\n    __typename\n  }\n  employerContent {\n    managedContent {\n      id\n      type\n      title\n      body\n      captions\n      photos\n      videos\n      __typename\n    }\n    __typename\n  }\n  employerAttributes {\n    attributes {\n      attributeName\n      attributeValue\n      __typename\n    }\n    __typename\n  }\n  gaTrackerData {\n    jobViewDisplayTimeMillis\n    requiresTracking\n    pageRequestGuid\n    searchTypeCode\n    trackingUrl\n    __typename\n  }\n  header {\n    jobLink\n    adOrderId\n    ageInDays\n    applicationId\n    appliedDate\n    applyUrl\n    applyButtonDisabled\n    categoryMgocId\n    campaignKeys\n    easyApply\n    employerNameFromSearch\n    employer {\n      activeStatus\n      bestProfile {\n        id\n        __typename\n      }\n      id\n      name\n      shortName\n      size\n      squareLogoUrl\n      __typename\n    }\n    expired\n    goc\n    gocId\n    hideCEOInfo\n    indeedJobAttribute {\n      education\n      skills\n      educationLabel\n      skillsLabel\n      yearsOfExperienceLabel\n      __typename\n    }\n    isIndexableJobViewPage\n    isSponsoredJob\n    isSponsoredEmployer\n    jobTitleText\n    jobType\n    jobTypeKeys\n    jobCountryId\n    jobResultTrackingKey\n    locId\n    locationName\n    locationType\n    normalizedJobTitle\n    payCurrency\n    payPeriod\n    payPeriodAdjustedPay {\n      p10\n      p50\n      p90\n      __typename\n    }\n    profileAttributes {\n      suid\n      label\n      match\n      type\n      __typename\n    }\n    rating\n    remoteWorkTypes\n    salarySource\n    savedJobId\n    seoJobLink\n    serpUrlForJobListing\n    sgocId\n    __typename\n  }\n  job {\n    description\n    discoverDate\n    eolHashCode\n    importConfigId\n    jobTitleId\n    jobTitleText\n    listingId\n    __typename\n  }\n  map {\n    address\n    cityName\n    country\n    employer {\n      id\n      name\n      __typename\n    }\n    lat\n    lng\n    locationName\n    postalCode\n    stateName\n    __typename\n  }\n  overview {\n    ceo(countryId: $countryId) {\n      name\n      photoUrl\n      __typename\n    }\n    id\n    name\n    shortName\n    squareLogoUrl\n    headquarters\n    links {\n      overviewUrl\n      benefitsUrl\n      photosUrl\n      reviewsUrl\n      salariesUrl\n      __typename\n    }\n    primaryIndustry {\n      industryId\n      industryName\n      sectorName\n      sectorId\n      __typename\n    }\n    ratings {\n      overallRating\n      ceoRating\n      ceoRatingsCount\n      recommendToFriendRating\n      compensationAndBenefitsRating\n      cultureAndValuesRating\n      careerOpportunitiesRating\n      seniorManagementRating\n      workLifeBalanceRating\n      __typename\n    }\n    revenue\n    size\n    sizeCategory\n    type\n    website\n    yearFounded\n    __typename\n  }\n  reviews {\n    reviews {\n      advice\n      cons\n      countHelpful\n      employerResponses {\n        response\n        responseDateTime\n        userJobTitle\n        __typename\n      }\n      employmentStatus\n      featured\n      isCurrentJob\n      jobTitle {\n        text\n        __typename\n      }\n      lengthOfEmployment\n      pros\n      ratingBusinessOutlook\n      ratingCareerOpportunities\n      ratingCeo\n      ratingCompensationAndBenefits\n      ratingCultureAndValues\n      ratingOverall\n      ratingRecommendToFriend\n      ratingSeniorLeadership\n      ratingWorkLifeBalance\n      reviewDateTime\n      reviewId\n      summary\n      __typename\n    }\n    __typename\n  }\n  __typename\n}\n',
+        },
+    ]
+
+        response = requests.post('https://www.glassdoor.co.uk/graph', cookies=cookies, headers=headers, json=json_data)
+        
+        result = response.json()
+        description = result[1]['data']['jobview']['job']['description']
+        return description
+    except Exception as e:
+        error_message = f"Failed to extract job description: {str(e)}"
+        print(error_message)
+        notify_failure(error_message, "extract_description")
+        return "No description available"
+
+def scrape_glassdoor_jobs(cookies, headers, url):
+    """Main function to scrape Glassdoor jobs."""
+    # Static parameters for POST
+    base_url = "https://www.glassdoor.co.uk/graph"
+    base_variables = {
+        'excludeJobListingIds': [],
+        'filterParams': [
+            {'filterKey': 'maxSalary', 'values': '9000000'},
+            {'filterKey': 'minSalary', 'values': '250000'},
+        ],
+        'keyword': '',
+        'locationId': 7287,
+        'locationType': 'STATE',
+        'numJobsToShow': 30,
+        'originalPageUrl': url,
+        'parameterUrlInput': 'IL.0,10_IS7287',
+        'pageType': 'SERP',
+        'queryString': 'maxSalary=9000000&minSalary=250000',
+        'seoFriendlyUrlInput': 'england-uk-jobs',
+        'seoUrl': True,
+        'includeIndeedJobAttributes': False
+    }
+
+    # Initial page cursor and number
+    initial_cursor = None
+    initial_page_number = 1
+
+    # Container for scraped jobs
+    scraped_jobs = []
+
+    try:
+        # Function to fetch jobs for a page
+        def fetch_jobs(page_cursor, page_number):
+            json_data = [{
+                'operationName': 'JobSearchResultsQuery',
+                'variables': {
+                    **base_variables,
+                    'pageCursor': page_cursor,
+                    'pageNumber': page_number,
+                },
+                'query': 'query JobSearchResultsQuery($excludeJobListingIds: [Long!], $filterParams: [FilterParams], $keyword: String, $locationId: Int, $locationType: LocationTypeEnum, $numJobsToShow: Int!, $originalPageUrl: String, $pageCursor: String, $pageNumber: Int, $pageType: PageTypeEnum, $parameterUrlInput: String, $queryString: String, $seoFriendlyUrlInput: String, $seoUrl: Boolean, $includeIndeedJobAttributes: Boolean) {\n  jobListings(\n    contextHolder: {queryString: $queryString, pageTypeEnum: $pageType, searchParams: {excludeJobListingIds: $excludeJobListingIds, filterParams: $filterParams, keyword: $keyword, locationId: $locationId, locationType: $locationType, numPerPage: $numJobsToShow, pageCursor: $pageCursor, pageNumber: $pageNumber, originalPageUrl: $originalPageUrl, seoFriendlyUrlInput: $seoFriendlyUrlInput, parameterUrlInput: $parameterUrlInput, seoUrl: $seoUrl, searchType: SR, includeIndeedJobAttributes: $includeIndeedJobAttributes}}\n  ) {\n    companyFilterOptions {\n      id\n      shortName\n      __typename\n    }\n    filterOptions\n    indeedCtk\n    jobListings {\n      ...JobListingJobView\n      __typename\n    }\n    jobSearchTrackingKey\n    jobsPageSeoData {\n      pageMetaDescription\n      pageTitle\n      __typename\n    }\n    paginationCursors {\n      cursor\n      pageNumber\n      __typename\n    }\n    indexablePageForSeo\n    searchResultsMetadata {\n      searchCriteria {\n        implicitLocation {\n          id\n          localizedDisplayName\n          type\n          __typename\n        }\n        keyword\n        location {\n          id\n          shortName\n          localizedShortName\n          localizedDisplayName\n          type\n          __typename\n        }\n        __typename\n      }\n      footerVO {\n        countryMenu {\n          childNavigationLinks {\n            id\n            link\n            textKey\n            __typename\n          }\n          __typename\n        }\n        __typename\n      }\n      helpCenterDomain\n      helpCenterLocale\n      jobAlert {\n        jobAlertId\n        __typename\n      }\n      jobSerpFaq {\n        questions {\n          answer\n          question\n          __typename\n        }\n        __typename\n      }\n      jobSerpJobOutlook {\n        occupation\n        paragraph\n        heading\n        __typename\n      }\n      showMachineReadableJobs\n      __typename\n    }\n    serpSeoLinksVO {\n      relatedJobTitlesResults\n      searchedJobTitle\n      searchedKeyword\n      searchedLocationIdAsString\n      searchedLocationSeoName\n      searchedLocationType\n      topCityIdsToNameResults {\n        key\n        value\n        __typename\n      }\n      topEmployerIdsToNameResults {\n        key\n        value\n        __typename\n      }\n      topOccupationResults\n      __typename\n    }\n    totalJobsCount\n    __typename\n  }\n}\n\nfragment JobListingJobView on JobListingSearchResult {\n  jobview {\n    header {\n      indeedJobAttribute {\n        skills\n        extractedJobAttributes {\n          key\n          value\n          __typename\n        }\n        __typename\n      }\n      adOrderId\n      ageInDays\n      easyApply\n      employer {\n        id\n        name\n        shortName\n        __typename\n      }\n      expired\n      occupations {\n        key\n        __typename\n      }\n      employerNameFromSearch\n      goc\n      gocId\n      isSponsoredJob\n      isSponsoredEmployer\n      jobCountryId\n      jobLink\n      jobResultTrackingKey\n      normalizedJobTitle\n      jobTitleText\n      locationName\n      locationType\n      locId\n      payCurrency\n      payPeriod\n      payPeriodAdjustedPay {\n        p10\n        p50\n        p90\n        __typename\n      }\n      rating\n      salarySource\n      savedJobId\n      seoJobLink\n      __typename\n    }\n    job {\n      descriptionFragmentsText\n      importConfigId\n      jobTitleId\n      jobTitleText\n      listingId\n      __typename\n    }\n    jobListingAdminDetails {\n      userEligibleForAdminJobDetails\n      __typename\n    }\n    overview {\n      shortName\n      squareLogoUrl\n      __typename\n    }\n    __typename\n  }\n  __typename\n}\n'
+            }]
+            response = requests.post(base_url, cookies=cookies, headers=headers, json=json_data)
+            return response.json()
+
+        # Start navigation
+        next_cursor = initial_cursor
+        page_number = initial_page_number
+
+        while True:
+            data = fetch_jobs(next_cursor, page_number)
+            try:
+                job_listings = data[0]['data']['jobListings']['jobListings']
+                pagination_cursors = data[0]['data']['jobListings']['paginationCursors']
+            except KeyError:
+                error_message = f"Stopping at page {page_number}: Unexpected response structure"
+                print(error_message)
+                notify_failure(error_message, "scrape_glassdoor_jobs")
+                break
+            
+            for job_item in job_listings:
+                header = job_item['jobview']['header']
+
+                _job_tracking_key = header['jobResultTrackingKey']
+                _partner_link = header['jobLink']
+
+                _job_link = header.get('seoJobLink')
+                _jl = _job_link.split('?jl=')[-1]
+
+                query_string = _partner_link.split("/partner/jobListing.htm?")[-1]
+                description = extract_description(cookies, headers, _job_tracking_key, _jl, query_string)
+
+                _partner_link = _partner_link.replace("GD_JOB_AD", "GD_JOB_VIEW")
+                external_link = extract_external_url(cookies, headers, _partner_link)
+
+                url = None
+                if not external_link:
+                    url = header.get('seoJobLink')
+                else:
+                    url = external_link
+
+                salary = None
+                try:
+                    salary = job_item['jobview']['header'].get('payPeriodAdjustedPay', {}).get('p50', None)
+                except:
+                    salary = ''
+
+                company_name = clean_name(header.get('employer', {}).get('name', ''))
+
+                if company_name not in company_list:
+                    continue
+
+                job_entry = {
+                    "job_title": header.get('jobTitleText', ''),
+                    "company_name": company_name,
+                    "company_logo": job_item['jobview'].get('overview', {}).get('squareLogoUrl', ''),
+                    "salary": salary,
+                    "posted_date": f"{header.get('ageInDays', '')} days ago",
+                    "experience": None,
+                    "location": header.get('locationName', ''),
+                    "apply_link": url,
+                    "description": description,
+                    "data_source": "glassdoor"
+                }
+
+                if job_entry['company_name'] is not None:
+                    scraped_jobs.append(job_entry)
+
+            print(f"Scraped page {page_number} with {len(job_listings)} jobs.")
+
+            # Dynamically find next cursor
+            next_page_cursor = None
+            for p_cursor in pagination_cursors:
+                if p_cursor.get('pageNumber') == page_number + 1:
+                    next_page_cursor = p_cursor.get('cursor')
+                    break
+
+            if not next_page_cursor:
+                print("No more pages available.")
+                break
+
+            next_cursor = next_page_cursor
+            page_number += 1
+
+            time.sleep(1)
+        
+        print(f"Scraped total {len(scraped_jobs)} jobs successfully.")
+        return scraped_jobs
+        
+    except Exception as e:
+        error_message = f"Failed during scraping: {str(e)}"
+        print(error_message)
+        notify_failure(error_message, "scrape_glassdoor_jobs")
         return []
 
 def main():
-    """Main function to coordinate the Glassdoor scraping process."""
+    """Main function to run the scraper."""
     try:
-        global chat_id, TOKEN
-        chat_id = get_chat_id(TOKEN)
-        if chat_id:
-            send_message(TOKEN, f"🚀 Glassdoor scraper started at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", chat_id)
-        
         # Initialize database
         init_db()
         
-        # Get company list
-        get_company_list()
-
-        urls = {
-            "england": "https://www.glassdoor.co.uk/Job/england-uk-jobs-SRCH_IL.0,10_IS7287.htm?maxSalary=9000000&minSalary=250000",
-            "scotland": "https://www.glassdoor.co.uk/Job/scotland-uk-jobs-SRCH_IL.0,11_IS7289.htm?maxSalary=9000000&minSalary=250000",
-            "wales": "https://www.glassdoor.co.uk/Job/wales-uk-jobs-SRCH_IL.0,8_IS7290.htm?maxSalary=9000000&minSalary=250000",
-            "northern_ireland": "https://www.glassdoor.co.uk/Job/northern-ireland-uk-jobs-SRCH_IL.0,19_IS7288.htm?maxSalary=9000000&minSalary=250000"
+        cookies = {
+        'gdId': 'a9a3794f-c3cd-4dc3-ba7a-bd24bb8cd9a2',
+        'indeedCtk': '1ipgg2g8jk8ii801',
+        'rl_page_init_referrer': 'RudderEncrypt%3AU2FsdGVkX18YwXiSsJngik2uKCMUD3VqwUx1sp%2BvgH4%3D',
+        'rl_page_init_referring_domain': 'RudderEncrypt%3AU2FsdGVkX18mTosiyE8JBUueuG8L01kt516kMhkqzq8%3D',
+        '_optionalConsent': 'true',
+        'ki_r': '',
+        'ki_s': '240196%3A0.0.0.0.0',
+        '_gcl_au': '1.1.1933671595.1745643872',
+        '_fbp': 'fb.2.1745643872476.193155387393605754',
+        'trs': 'INVALID:SEO:SEO:2021-11-29+09%3A00%3A16.8:undefined:undefined',
+        'uc': '8013A8318C98C5172ACA70CF4222A8AAD282B8714CD4AADAA8AB8B9B95BD6A3D51F4CEEA8A10DE766A74B2DA5561A91E679EDE37C16A7B1F66AF1F6FCDE359C48973A874B4F8E8FD3CFFC10792B9AEBA6A2C27B929C93FBB029090B32FA6A89ACDC1996A94C9A1B36C00CA3CEA6A05EE2A2131D99E0789229F4BA87DAC72A45A4CC89960A391E37037E1A04EEDF5BDCD',
+        'JSESSIONID': '0D5453235D5FAA154D9F54C9129B8BF6',
+        'GSESSIONID': '0D5453235D5FAA154D9F54C9129B8BF6',
+        'cass': '0',
+        'asst': '1745734925.0',
+        'rsSessionId': '1745734925461',
+        'AWSALB': 'Kvy0Tqe/BnCYdK7VR0sMFzrWdQQsjW8KedjEjr3vR4qNwEEVuh8phUmI82zacfzXifmnlV03ldRHMLJEjqcI7hs/KFKbdBjc/3gm7baEKJvHCsX6wbN61oeQM4d6',
+        'AWSALBCORS': 'Kvy0Tqe/BnCYdK7VR0sMFzrWdQQsjW8KedjEjr3vR4qNwEEVuh8phUmI82zacfzXifmnlV03ldRHMLJEjqcI7hs/KFKbdBjc/3gm7baEKJvHCsX6wbN61oeQM4d6',
+        'rsReferrerData': '%7B%22currentPageRollup%22%3A%22%2Fjob%2Fjobs-srch%22%2C%22previousPageRollup%22%3A%22%2Fjob%2Fjobs-srch%22%2C%22currentPageAbstract%22%3A%22%2FJob%2Fjobs-SRCH_%5BPRM%5D.htm%22%2C%22previousPageAbstract%22%3A%22%2FJob%2Fjobs-SRCH_%5BPRM%5D.htm%22%2C%22currentPageFull%22%3A%22https%3A%2F%2Fwww.glassdoor.co.uk%2FJob%2Fengland-uk-jobs-SRCH_IL.0%2C10_IS7287.htm%3FmaxSalary%3D9000000%26minSalary%3D250000%22%2C%22previousPageFull%22%3A%22https%3A%2F%2Fwww.glassdoor.co.uk%2FJob%2Fengland-uk-jobs-SRCH_IL.0%2C10_IS7287.htm%3FmaxSalary%3D9000000%26minSalary%3D250000%22%7D',
+        'gdsid': '1745730962237:1745737340938:E1C674D26BDAE98E7710081EDDBAF095',
+        'rl_user_id': 'RudderEncrypt%3AU2FsdGVkX18RqGpWEKY86lqrcbwcS1vUF79m2wIchDU%3D',
+        'rl_trait': 'RudderEncrypt%3AU2FsdGVkX19DoqB8uifMVvX%2BTgA5sHbj2Sr7C5TdeQhKzR1XQnMLoT1zYXOWdbrv0hMntVgl1mBoTozfl%2FndLyEUKUBvUUJ2b6WTZh2WsmZRI9pJBWCQ%2BseF4yEjqmPwUVBj0WGHSUXv%2FLNQyfGssP8zrtwE2HQmJ3qJ7jEG9HU%3D',
+        'rl_group_id': 'RudderEncrypt%3AU2FsdGVkX1%2FlkL6%2BaUQ8cypeemJg%2BAsFkSJZl7nvxH0%3D',
+        'rl_group_trait': 'RudderEncrypt%3AU2FsdGVkX1%2BqnzKmUZGdxEPM9ri43zoSJ3vqA65uhq8%3D',
+        'OptanonConsent': 'isGpcEnabled=0&datestamp=Sun+Apr+27+2025+12%3A32%3A21+GMT%2B0530+(India+Standard+Time)&version=202407.2.0&browserGpcFlag=0&isIABGlobal=false&hosts=&consentId=1eafc5e2-9db4-4939-85fe-8f9a22faffeb&interactionCount=1&isAnonUser=1&landingPath=NotLandingPage&groups=C0001%3A1%2CC0003%3A1%2CC0002%3A1%2CC0004%3A1%2CC0017%3A1&AwaitingReconsent=false',
+        'rl_anonymous_id': 'RudderEncrypt%3AU2FsdGVkX19zwRa4k11tZ7%2BdeCXa0tiSW9Srkjau%2BEan68S5ncSG2q5xYe9kf1WJzdk%2FbkmMnWx3x5NeABZG0Q%3D%3D',
+        'ki_t': '1745384200319%3B1745730968420%3B1745737343114%3B3%3B27',
+        'rl_session': 'RudderEncrypt%3AU2FsdGVkX1%2FtpypN%2BxiswjXxyD4kqoVKsoiloMLSMpCu0dfLoSCd%2BEMUmNV9BB8o6I9QTb21%2B5zFQ90g4CoQVzFFtchm4EN%2FwBNegV02%2FcsTsd31iddcZ5j0APKqp25mW8wWBbmLO78ms0AXy3V0Ng%3D%3D',
+        'at': 'eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJqdGkiOiI3NWFkZDk2Ny0yZGM3LTQwYzMtYTY1My0zODllNzBiMWEzNzUiLCJ1IjoiYmlyYXBwYS4wMDFAZ21haWwuY29tIiwidWlkIjoyMTkwNTMyMTcsInJmc2giOjE3NDU3MzgxMTI1OTUsInJtYl9pYXQiOjE3NDU2NDQwNDIyNjksInJtYl9leHAiOjE3NzcxODAwNDIyNjksImF0dCI6InJtIiwiYXV0aG9yaXRpZXMiOls0NSw0NywyOF19.e3OzGk-RsF1GNjoxTPwjaK-ZduVvzcqP1ObJfpIUPfVw1rDCe_UXzGOgnjkhec1She_jZvuq-Sz304IjiVqpMU4pNyGpFfky9R5GdP_TKliQlzi6Ij_zk2fGZBloogT8f6QkbvBPgQ9pCkCtNHZJw85YoQmyMdV07FArjyp4teYV8JU_x86krnV6iJ3DxkdMDn7gqtEPBxJfAUUAMhq4DHOuGd2J2fwSddlKJxvon5agfzvG1VpPbmDpOo_sadGwipHmahNjxebIBUhMYLq4YZw1XnSyB85_i6azAhhMS1urFwNX_a5HERdaGC0tY2zrYT_-SwXomAnQYf45RhCBVg',
+        '__cf_bm': 'NTOtGBu2LIMUvPByq5.qp4fjCwbMVYOTsaAJ2Ny.cqU-1745737514-1.0.1.1-v58GUF58D0TCNTvf9SbcgOFbrB6miX6AdnWxb6KCgXjx_jz6dr2DLU7bBheZKcG1FibUskgov8J.UwPbllsdyrruy.Ub6hYMrCLDjmEOGjI',
+        '_cfuvid': 'xRlGiXuNwfJ5DJ552sxmdPHoPVKX1nN2f7iTX2bwFHA-1745737514046-0.0.1.1-604800000',
+        'bs': 'gEIevmbRsUVADBX3VJS85w:FohxaHtapDDt3gVLDZpz8ii1RV9lruKfR6zvEdLnYNY2U6ijvKXA5XhiBGO5RPVvq_WQmV55egADEM8hemPAHmIqSFgLVdrFnuf8D0eMYn0:qS3jBMYXz2Ae0eBF4NZBc88nm365XAC0UX2S2_YThs0',
+        '_dd_s': 'rum=0&expire=1745738412988',
+        'cdArr': '0',
+        'cdzNum': '7',
+    }
+        
+        headers = {
+            'accept': '*/*',
+            'accept-language': 'en-GB,en-US;q=0.9,en;q=0.8,hi;q=0.7,kn;q=0.6',
+            'apollographql-client-name': 'job-search-next',
+            'apollographql-client-version': '7.171.5',
+            'content-type': 'application/json',
+            'gd-csrf-token': 'WGdzRzPkm9YKBD_eEika_w:4J82BhpwApC7vyMUWDdhe-VZOfdeWoDnNvJ40Z8YJDNAusLPiWPt-7K_tbcEXGQJfnzIataDCrJAV6YaAzHHig:GG6KqDxAE1hFSx5Rr06AKrpebRevUHAJacq4xQZvExc',
+            'origin': 'https://www.glassdoor.co.uk',
+            'priority': 'u=1, i',
+            'referer': 'https://www.glassdoor.co.uk/',
+            'sec-ch-ua': '"Google Chrome";v="135", "Not-A.Brand";v="8", "Chromium";v="135"',
+            'sec-ch-ua-arch': '""',
+            'sec-ch-ua-bitness': '"64"',
+            'sec-ch-ua-full-version': '"135.0.7049.115"',
+            'sec-ch-ua-full-version-list': '"Google Chrome";v="135.0.7049.115", "Not-A.Brand";v="8.0.0.0", "Chromium";v="135.0.7049.115"',
+            'sec-ch-ua-mobile': '?1',
+            'sec-ch-ua-model': '"Nexus 5"',
+            'sec-ch-ua-platform': '"Android"',
+            'sec-ch-ua-platform-version': '"6.0"',
+            'sec-fetch-dest': 'empty',
+            'sec-fetch-mode': 'cors',
+            'sec-fetch-site': 'same-origin',
+            'user-agent': 'Mozilla/5.0 (Linux; Android 6.0; Nexus 5 Build/MRA58N) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Mobile Safari/537.36',
+            'x-gd-job-page': 'serp',
         }
+        
+        # First, delete existing Glassdoor jobs
+        delete_jobs_by_source("glassdoor")
+        
+        total_jobs = []
+        # Scrape new jobs
+        urls = [
+            "https://www.glassdoor.co.uk/Job/england-uk-jobs-SRCH_IL.0,10_IS7287.htm?maxSalary=9000000&minSalary=300000",
+             "https://www.glassdoor.co.uk/Job/scotland-uk-jobs-SRCH_IL.0,11_IS7289.htm?maxSalary=9000000&minSalary=300000",
+            "https://www.glassdoor.co.uk/Job/wales-uk-jobs-SRCH_IL.0,8_IS7290.htm?maxSalary=9000000&minSalary=300000",
+            "https://www.glassdoor.co.uk/Job/northern-ireland-uk-jobs-SRCH_IL.0,19_IS7288.htm?maxSalary=9000000&minSalary=300000"
+        ]
 
-        all_data = []
-
-        with sync_playwright() as p:
-            try:
-                browser = p.chromium.launch(headless=True)
-                context = browser.new_context(
-                    locale="en-GB,en;q=0.5",
-                    geolocation={"latitude": 51.509865, "longitude": -0.118092},
-                    permissions=["geolocation"],
-                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
-                )
-                page = context.new_page()
-
-                for region, url in urls.items():
-                    try:
-                        print(f"\n🚀 Scraping jobs for: {region.upper()}")
-                        page.goto(url)
-                        time.sleep(3)
-
-                        prev_count = 0
-                        stable_rounds = 0
-
-                        while True:
-                            try:
-                                close_btn = page.query_selector("button.CloseButton")
-                                if close_btn:
-                                    close_btn.click()
-                                    time.sleep(1)
-                            except Exception as e:
-                                pass
-
-                            for _ in range(3):
-                                page.mouse.wheel(0, 2000)
-                                time.sleep(1)
-
-                            content = page.content()
-                            soup = BeautifulSoup(content, 'html.parser')
-                            current_jobs = soup.select("ul.JobsList_jobsList__lqjTr li")
-                            current_count = len(current_jobs)
-                            print(f"Currently loaded: {current_count} jobs")
-
-                            try:
-                                button = page.query_selector('button[data-test="load-more"]')
-                                if button:
-                                    print("Clicking 'Show more jobs'...")
-                                    button.click()
-                                    time.sleep(random.uniform(1.5, 4))
-                                else:
-                                    print("No 'Show more jobs' button found.")
-                            except Exception as e:
-                                print(f"Error clicking 'Show more jobs': {e}")
-
-                            if current_count == prev_count:
-                                stable_rounds += 1
-                                if stable_rounds >= 3:
-                                    break
-                            else:
-                                stable_rounds = 0
-                                prev_count = current_count
-
-                        final_content = page.content()
-                        region_jobs = extract_data(final_content, region)
-                        all_data.extend(region_jobs)
-
-                        if len(region_jobs) < 5 and current_count > 10:
-                            notify_failure(f"Only {len(region_jobs)} jobs collected from {region} after filtering", f"region_scraping({region})")
-
-                    except Exception as e:
-                        error_message = f"Error scraping {region}: {str(e)}"
-                        print(error_message)
-                        notify_failure(error_message, f"region_scraping({region})")
-
-                browser.close()
-
-            except Exception as e:
-                error_message = f"Browser error: {str(e)}"
-                print(error_message)
-                notify_failure(error_message, "browser_setup")
-
-        try:
-            if len(all_data) == 0:
-                error_message = "No jobs collected from any region"
-                print(error_message)
-                notify_failure(error_message, "data_collection")
-                return
-
-            # Save to JSON file
-            with open("glassdoor_all_uk.json", "w+", encoding="utf-8") as final_file:
-                json.dump(all_data, final_file, indent=2)
-
-            # Save to CSV file
-            df = pd.DataFrame(all_data)
-            columns = [
-                "title", "experience", "salary", "location", "job_type",
-                "url", "company", "description", "posted_date", "company_logo", 
-                "apply_link", "country", "source", "ingestion_timestamp"
-            ]
-            existing_columns = [col for col in columns if col in df.columns]
-            df = df[existing_columns]
-            os.makedirs("data", exist_ok=True)
-            df.to_csv('data/glassdoor_data.csv', index=False)
+        for url in urls:
+            scraped_jobs = scrape_glassdoor_jobs(cookies, headers, url)
+            total_jobs.extend(scraped_jobs)
+        
+        if total_jobs:
+            insert_jobs_to_db(total_jobs)
             
-            # Insert jobs into database
-            inserted_count = insert_jobs_to_db(all_data)
-
-            if chat_id:
-                success_message = (
-                    f"✅ Glassdoor scraper completed successfully at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
-                    f"Scraped {len(all_data)} jobs across {len(urls)} UK regions\n"
-                    f"Inserted {inserted_count} jobs into database"
-                )
-                send_message(TOKEN, success_message, chat_id)
-
-        except Exception as e:
-            error_message = f"Failed to save data: {str(e)}\n{traceback.format_exc()}"
-            print(error_message)
-            notify_failure(error_message, "data_saving")
-
+        notify_success(f"Complete scraping process finished. Scraped and inserted {len(total_jobs)} jobs.")
+            
     except Exception as e:
-        error_message = f"Critical failure in main: {str(e)}\n{traceback.format_exc()}"
+        error_message = f"Failed in main function: {str(e)}"
         print(error_message)
         notify_failure(error_message, "main")
 

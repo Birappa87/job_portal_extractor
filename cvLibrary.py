@@ -46,13 +46,12 @@ class Job(Base):
     company_name = Column(String(255), nullable=False)
     company_logo = Column(String, nullable=True)
     salary = Column(String(100), nullable=True)
-    posted_date = Column(Date, nullable=False)
+    posted_date = Column(Text, nullable=False)
     experience = Column(String(100), nullable=True)
     location = Column(String(255), nullable=True)
     apply_link = Column(String, nullable=False)
     data_source = Column(String(180), nullable=False)
     country = Column(String(50), nullable=True)
-    ingestion_timestamp = Column(String, nullable=True)
 
 # Database setup function
 def setup_database():

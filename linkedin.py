@@ -16,12 +16,59 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium_stealth import stealth
 from selenium.common.exceptions import NoSuchElementException, ElementClickInterceptedException, TimeoutException, StaleElementReferenceException
 from webdriver_manager.chrome import ChromeDriverManager
+from sqlalchemy import create_engine, Column, Integer, String, Text, Date
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker
+import asyncio
+from bs4 import BeautifulSoup
+import logging
+from rnet import Client, Impersonate
 
 # Global variables for Telegram notifications
 TOKEN = '7844666863:AAF0fTu1EqWC1v55oC25TVzSjClSuxkO2X4'
 chat_id = None
 company_list = []
 company_name_map = {}  # New dictionary to store fuzzy matching results
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+# Database setup
+Base = declarative_base()
+engine = create_engine('postgresql://postgres.gncxzrslsmbwyhefawer:tRIOI1iU59gyK1nk@aws-0-eu-west-2.pooler.supabase.com:6543/postgres')
+Session = sessionmaker(bind=engine)
+
+# Define the database model
+class Job(Base):
+    __tablename__ = 'jobs'
+    
+    id = Column(Integer, primary_key=True)
+    job_title = Column(String(255), nullable=False)
+    company_name = Column(String(255), nullable=False)
+    company_logo = Column(Text, nullable=True)
+    salary = Column(String(100), nullable=True)
+    posted_date = Column(Text, nullable=False)
+    experience = Column(String(100), nullable=True)
+    location = Column(String(255), nullable=True)
+    apply_link = Column(Text, nullable=False)
+    description = Column(Text, nullable=True)
+    data_source = Column(String(180), nullable=False)
+
+# Function to ensure database tables exist
+def setup_database():
+    """Create database tables if they don't exist"""
+    try:
+        Base.metadata.create_all(engine)
+        logger.info("Database tables created successfully")
+    except Exception as e:
+        error_message = f"Database setup error: {str(e)}"
+        logger.error(error_message)
+        notify_failure(error_message, "setup_database")
+
 
 def get_chat_id(TOKEN: str) -> str:
     """Fetches the chat ID from the latest Telegram bot update."""
@@ -205,16 +252,7 @@ try:
     except TimeoutException:
         print("⚠️ Page took too long to load, but continuing anyway")
 
-    # Accept cookies if popup appears
-    try:
-        accept_btn = WebDriverWait(driver, 5).until(
-            EC.element_to_be_clickable((By.XPATH, "//button[contains(text(),'Accept') or contains(text(),'Agree') or contains(text(),'cookies')]"))
-        )
-        accept_btn.click()
-        print("🍪 Accepted cookies")
-        human_delay()
-    except (TimeoutException, NoSuchElementException):
-        print("No cookie prompt detected or already accepted")
+
 except Exception as e:
     error_message = f"Failed during initial setup and page loading: {str(e)}"
     notify_failure(error_message, "Initial setup")
@@ -341,6 +379,59 @@ def close_popups():
         print(error_message)
         notify_failure(error_message, "close_popups")
 
+import json
+from bs4 import BeautifulSoup
+import html
+
+def extract_job_description(html_content):
+    soup = BeautifulSoup(html_content, "html.parser")
+    script_tag = soup.find("script", type="application/ld+json")
+    
+    if not script_tag:
+        return None
+
+    try:
+        job_json = json.loads(script_tag.string)
+        raw_description = job_json.get("description", "")
+        # Convert HTML entities (e.g., &lt;p&gt;) to actual characters
+        decoded_description = html.unescape(raw_description)
+        return decoded_description.strip()
+    except json.JSONDecodeError:
+        return None
+
+async def parse_url(url):
+    client = Client(impersonate=Impersonate.Firefox136)
+    resp = await client.get(url)
+    print("Status Code: ", resp.status_code)
+    
+    content = await resp.text()
+
+    soup = BeautifulSoup(content, "html.parser")
+    description = extract_job_description(content)
+
+    try:
+        external_url = soup.find('code', id='applyUrl')
+        if external_url:
+            external_url = external_url.string
+            external_url = external_url.split("url=")[-1]
+        else:
+            external_url = url
+    except:
+        external_url = url
+
+    return external_url, description
+
+
+def get_external_url(url):
+    try:
+        return asyncio.run(parse_url(url))
+    except RuntimeError:
+        # If event loop already running
+        loop = asyncio.get_event_loop()
+        task = loop.create_task(parse_url(url))
+        return loop.run_until_complete(task)
+
+
 def extract_job_details(html):
     try:
         soup = BeautifulSoup(html, 'html.parser')
@@ -379,11 +470,14 @@ def extract_job_details(html):
             job_data['posted_datetime'] = time_tag.get('datetime') if time_tag else None
 
             link_tag = job.select_one('a.base-card__full-link')
-            job_data['job_url'] = link_tag.get('href') if link_tag else None
+            url = link_tag.get('href') if link_tag else None
 
             logo_tag = job.select_one(".artdeco-entity-image")
             job_data['logo_url'] = logo_tag.get('src') if logo_tag else None
 
+            external_url, descrition  = get_external_url(url)
+            job_data['job_url'] = external_url
+            job_data['description'] = descrition
             job_listings.append(job_data)
 
         print(f"📊 Extraction stats: {matching_jobs}/{total_jobs} jobs matched target companies")
@@ -412,6 +506,66 @@ def check_page_content_updated(previous_job_count):
         print(f"⚠️ Error checking page content: {e}")
         return False, previous_job_count
 
+def insert_jobs_to_db(job_listings):
+    """Delete all jobs with data_source='linkedin' and insert new jobs"""
+    if not job_listings:
+        logger.info("No jobs to insert into database")
+        return 0
+    
+    inserted_count = 0
+    
+    try:
+        session = Session()
+        try:
+            # Delete all existing records with data_source='linkedin'
+            logger.info("Deleting all existing LinkedIn jobs from database...")
+            deleted_count = session.query(Job).filter(Job.data_source == 'linkedin').delete()
+            logger.info(f"Deleted {deleted_count} existing LinkedIn jobs")
+            
+            # Insert new records
+            logger.info(f"Inserting {len(job_listings)} new jobs...")
+            for job in job_listings:
+                try:
+                    # Skip jobs with certain keywords in salary if needed
+                    salary = job.get('salary', '')
+                    
+                    # Create new job object
+                    new_job = Job(
+                        job_title=job.get('title', ''),
+                        company_name=job.get('company', ''),
+                        company_logo=job.get('logo_url', ''),
+                        salary=job.get('salary', '') if job.get('salary') else None,
+                        posted_date=job.get('posted_date', ''),
+                        experience='Full-time',  # Default or extract from job data if available
+                        location=job.get('location', '') if job.get('location') else None,
+                        apply_link=job.get('job_url', ''),
+                        descrition=job.get('descrition', ''),
+                        data_source='linkedin'
+                    )
+                    
+                    session.add(new_job)
+                    inserted_count += 1
+                except Exception as e:
+                    logger.error(f"Error processing job object: {str(e)}")
+            
+            # Commit the changes
+            session.commit()
+            logger.info(f"Successfully inserted {inserted_count} new jobs")
+            
+        except Exception as e:
+            error_message = f"Database operation error: {str(e)}"
+            logger.error(error_message)
+            notify_failure(error_message, "insert_jobs_to_db")
+            session.rollback()
+        finally:
+            session.close()
+    except Exception as e:
+        error_message = f"Database session error: {str(e)}"
+        logger.error(error_message)
+        notify_failure(error_message, "insert_jobs_to_db")
+    
+    return inserted_count
+	
 def load_all_jobs():
     global chat_id  # Declare chat_id as global within this function
     
@@ -546,6 +700,8 @@ def load_all_jobs():
         
         # Final deduplication
         total_jobs = remove_duplicates(total_jobs)
+
+        insert_jobs_to_db(total_jobs)
         
         print(f"🏁 Total jobs loaded: {final_count}")
         print(f"🏁 Filtered jobs (matching companies): {len(total_jobs)}")
@@ -602,10 +758,8 @@ try:
     # Initialize chat_id early to avoid scope issues
     if chat_id is None:
         chat_id = get_chat_id(TOKEN)
-        
-    # If you want to deduplicate an existing file first, uncomment this line:
-    # deduplicate_existing_json()
-    
+
+    setup_database()
     # Run the main scraping process
     load_all_jobs()
 except Exception as e:
@@ -617,4 +771,4 @@ finally:
         driver.quit()
         print("Browser closed")
     except:
-        passw
+        pass
