@@ -1,153 +1,774 @@
-from playwright.sync_api import sync_playwright
-from bs4 import BeautifulSoup
+import json
 import time
 import random
-import json
-import pandas as pd
+import os
 import re
+import pandas as pd
+import requests
+from datetime import datetime
+from bs4 import BeautifulSoup
+from selenium import webdriver
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.common.by import By
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium_stealth import stealth
+from selenium.common.exceptions import NoSuchElementException, ElementClickInterceptedException, TimeoutException, StaleElementReferenceException
+from webdriver_manager.chrome import ChromeDriverManager
+from sqlalchemy import create_engine, Column, Integer, String, Text, Date
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker
+import asyncio
+from bs4 import BeautifulSoup
+import logging
+from rnet import Client, Impersonate
 
+# Global variables for Telegram notifications
+TOKEN = '7844666863:AAF0fTu1EqWC1v55oC25TVzSjClSuxkO2X4'
+chat_id = None
 company_list = []
+company_name_map = {}  # New dictionary to store fuzzy matching results
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+# Database setup
+Base = declarative_base()
+engine = create_engine('postgresql://postgres.gncxzrslsmbwyhefawer:tRIOI1iU59gyK1nk@aws-0-eu-west-2.pooler.supabase.com:6543/postgres')
+Session = sessionmaker(bind=engine)
+
+# Define the database model
+class Job(Base):
+    __tablename__ = 'jobs'
+    
+    id = Column(Integer, primary_key=True)
+    job_title = Column(String(255), nullable=False)
+    company_name = Column(String(255), nullable=False)
+    company_logo = Column(Text, nullable=True)
+    salary = Column(String(100), nullable=True)
+    posted_date = Column(Text, nullable=False)
+    experience = Column(String(100), nullable=True)
+    location = Column(String(255), nullable=True)
+    apply_link = Column(Text, nullable=False)
+    description = Column(Text, nullable=True)
+    data_source = Column(String(180), nullable=False)
+
+# Function to ensure database tables exist
+def setup_database():
+    """Create database tables if they don't exist"""
+    try:
+        Base.metadata.create_all(engine)
+        logger.info("Database tables created successfully")
+    except Exception as e:
+        error_message = f"Database setup error: {str(e)}"
+        logger.error(error_message)
+        notify_failure(error_message, "setup_database")
+
+
+def get_chat_id(TOKEN: str) -> str:
+    """Fetches the chat ID from the latest Telegram bot update."""
+    try:
+        url = f"https://api.telegram.org/bot{TOKEN}/getUpdates"
+        response = requests.get(url)
+        info = response.json()
+        chat_id = info['result'][0]['message']['chat']['id']
+        return chat_id
+    except Exception as e:
+        print(f"Failed to get chat ID: {e}")
+        return None
+
+def send_message(TOKEN: str, message: str, chat_id: str):
+    """Sends a message using Telegram bot."""
+    try:
+        url = f"https://api.telegram.org/bot{TOKEN}/sendMessage?chat_id={chat_id}&text={message}"
+        response = requests.get(url)
+        if response.status_code == 200:
+            print("Sent message successfully")
+        else:
+            print(f"Message not sent. Status code: {response.status_code}")
+    except Exception as e:
+        print(f"Failed to send message: {e}")
+
+def notify_failure(error_message, location="Unknown"):
+    """Sends a failure notification to Telegram."""
+    global chat_id, TOKEN
+    try:
+        if chat_id is None:
+            chat_id = get_chat_id(TOKEN)
+        if chat_id:
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            message = f"❌ LINKEDIN SCRAPER FAILURE at {timestamp}\nLocation: {location}\nError: {error_message}"
+            send_message(TOKEN, message, chat_id)
+    except Exception as e:
+        print(f"Failed to send failure notification: {e}")
 
 def clean_name(name):
-    name = str(name).strip().lower()
-    name = re.sub(r'[^a-z0-9\s]', '', name)  # Remove special characters
-    name = re.sub(r'\s+', ' ', name)  # Replace multiple spaces with single space
-    return name
+    """Cleans a company name for matching."""
+    try:
+        if not name:
+            return ""
+        name = str(name).strip().lower()
+        # Remove common legal suffixes
+        name = re.sub(r'\s+(ltd|limited|inc|incorporated|plc|llc|llp|co|corp|corporation)\.?$', '', name)
+        # Remove non-alphanumeric characters except spaces
+        name = re.sub(r'[^a-z0-9\s]', '', name)
+        # Replace multiple spaces with a single space
+        name = re.sub(r'\s+', ' ', name)
+        return name.strip()
+    except Exception as e:
+        error_message = f"Failed to clean name: {str(e)}"
+        notify_failure(error_message, "clean_name")
+        return ""
 
 def get_company_list():
-    global company_list
-    df = pd.read_csv(r"C:\Users\birap\Downloads\2025-04-04_-_Worker_and_Temporary_Worker.csv")
-    df['Organisation Name'] = df['Organisation Name'].apply(clean_name)
-    company_list = list(df['Organisation Name'])
+    """Loads and cleans the list of target companies from CSV."""
+    global company_list, company_name_map
+    try:
+        df = pd.read_csv(r"C:\\Users\\birap\\Downloads\\2025-04-04_-_Worker_and_Temporary_Worker.csv")
+        # Clean company names and create mapping dictionary
+        df['Clean Name'] = df['Organisation Name'].apply(clean_name)
+        company_list = list(df['Clean Name'])
+        
+        # Create a mapping from raw names to cleaned names for reference
+        for idx, row in df.iterrows():
+            original = row['Organisation Name']
+            cleaned = row['Clean Name']
+            company_name_map[cleaned] = original
+            
+        print(f"Loaded {len(company_list)} companies from CSV")
+    except Exception as e:
+        error_message = f"Failed to load company list: {str(e)}"
+        notify_failure(error_message, "get_company_list")
+        raise
 
-def extract_data(content):
-    soup = BeautifulSoup(content, 'html.parser')
-    job_element = soup.find('ul', class_='JobsList_jobsList__lqjTr')
-    if not job_element:
-        print("No job list found.")
+def is_company_in_list(company_name):
+    """Checks if a company name is in the target list using improved matching."""
+    try:
+        if not company_name:
+            return False
+        
+        clean_company = clean_name(company_name)
+        
+        # Exact match
+        if clean_company in company_list:
+            return True
+            
+        # Try partial matching for companies with longer names
+        for target_company in company_list:
+            # If either name contains the other completely
+            if clean_company in target_company or target_company in clean_company:
+                # Only match if the contained part is substantial (at least 5 chars)
+                if len(clean_company) >= 5 and len(target_company) >= 5:
+                    print(f"Fuzzy match found: '{company_name}' matches '{company_name_map.get(target_company, target_company)}'")
+                    return True
+        
+        return False
+    except Exception as e:
+        error_message = f"Failed to check company in list: {str(e)}"
+        notify_failure(error_message, "is_company_in_list")
+        return False
+
+def remove_duplicates(jobs_list):
+    """Removes duplicate job listings based on job URL."""
+    try:
+        unique_jobs = []
+        seen_urls = set()
+        
+        for job in jobs_list:
+            # Use job URL as unique identifier
+            job_url = job.get('job_url')
+            
+            if not job_url:
+                # If no URL (shouldn't happen), use combo of title and company
+                job_identifier = f"{job.get('title', '')}_{job.get('company', '')}_{job.get('location', '')}"
+            else:
+                job_identifier = job_url
+                
+            if job_identifier not in seen_urls:
+                seen_urls.add(job_identifier)
+                unique_jobs.append(job)
+        
+        print(f"Removed {len(jobs_list) - len(unique_jobs)} duplicate jobs")
+        return unique_jobs
+    except Exception as e:
+        error_message = f"Failed to remove duplicates: {str(e)}"
+        notify_failure(error_message, "remove_duplicates")
+        return jobs_list  # Return original list if deduplication fails
+
+# Setup Chrome with Stealth
+try:
+    options = Options()
+    options.add_argument("--start-maximized")
+    options.add_argument("--disable-blink-features=AutomationControlled")
+    options.add_argument("--disable-infobars")
+    options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--lang=en-US")
+    options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    options.add_experimental_option("useAutomationExtension", False)
+
+    driver = webdriver.Chrome(service=webdriver.ChromeService(ChromeDriverManager().install()), options=options)
+
+    # Apply stealth settings
+    stealth(driver,
+        languages=["en-US", "en"],
+        vendor="Google Inc.",
+        platform="Win32",
+        webgl_vendor="Intel Inc.",
+        renderer="Intel Iris OpenGL Engine",
+        fix_hairline=True,
+    )
+except Exception as e:
+    error_message = f"Failed to setup Chrome driver: {str(e)}"
+    notify_failure(error_message, "Chrome setup")
+    raise
+
+# Helper function for human-like waiting
+def human_delay(min_seconds=1, max_seconds=3):
+    time.sleep(random.uniform(min_seconds, max_seconds))
+
+try:
+    # Initialize chat_id early
+    chat_id = get_chat_id(TOKEN)
+    
+    # Load company list before starting
+    get_company_list()
+    
+    URL = "https://www.linkedin.com/jobs/search/?keywords=&location=United%20Kingdom&geoId=101165590&f_JT=F&f_E=4&f_SB2=41&f_TPR=r604800&f_WT=1%2C3"
+    driver.get(URL)
+    human_delay(4, 7)
+
+    # Wait for page to fully load
+    try:
+        WebDriverWait(driver, 10).until(
+            EC.presence_of_element_located((By.CSS_SELECTOR, ".jobs-search__results-list"))
+        )
+        print("✅ Page loaded successfully")
+    except TimeoutException:
+        print("⚠️ Page took too long to load, but continuing anyway")
+
+
+except Exception as e:
+    error_message = f"Failed during initial setup and page loading: {str(e)}"
+    notify_failure(error_message, "Initial setup")
+    raise
+
+def close_linkedin_popup():
+    try:
+        # Try the specific dismiss button you provided
+        specific_dismiss_selectors = [
+            "button.modal__dismiss.contextual-sign-in-modal__modal-dismiss",
+            "button.modal__dismiss[aria-label='Dismiss']",
+            "button.contextual-sign-in-modal__modal-dismiss",
+            ".modal__dismiss.contextual-sign-in-modal__modal-dismiss",
+            "button[aria-label='Dismiss']"
+        ]
+        
+        for selector in specific_dismiss_selectors:
+            try:
+                dismiss_buttons = driver.find_elements(By.CSS_SELECTOR, selector)
+                for button in dismiss_buttons:
+                    if button.is_displayed():
+                        print(f"🎯 Found specific dismiss button: {selector}")
+                        # Try JavaScript click which is more reliable
+                        driver.execute_script("arguments[0].click();", button)
+                        print("✅ Closed LinkedIn sign-in popup")
+                        human_delay(1, 2)
+                        return True
+            except Exception as e:
+                continue
+        
+        # Use the XPath approach as backup
+        xpath_selectors = [
+            "//button[contains(@class, 'modal__dismiss')]",
+            "//button[@aria-label='Dismiss']",
+            "//button[contains(@class, 'contextual-sign-in-modal__modal-dismiss')]"
+        ]
+        
+        for xpath in xpath_selectors:
+            try:
+                elements = driver.find_elements(By.XPATH, xpath)
+                for element in elements:
+                    if element.is_displayed():
+                        driver.execute_script("arguments[0].click();", element)
+                        print(f"✅ Closed popup using XPath: {xpath}")
+                        human_delay(1, 2)
+                        return True
+            except:
+                continue
+                
+        # Last resort: try to use JavaScript to disable the modal directly
+        driver.execute_script("""
+            // Try to find and hide any modal or overlay
+            var modals = document.querySelectorAll('.modal, .modal__overlay, [role="dialog"], .artdeco-modal, .contextual-sign-in-modal');
+            modals.forEach(function(modal) {
+                if (modal && modal.style.display !== 'none') {
+                    modal.style.display = 'none';
+                    console.log('Hidden modal via JS');
+                }
+            });
+            
+            // Remove potential overlay backdrop
+            var backdrops = document.querySelectorAll('.modal__overlay, .artdeco-modal-overlay');
+            backdrops.forEach(function(backdrop) {
+                if (backdrop) {
+                    backdrop.remove();
+                    console.log('Removed backdrop via JS');
+                }
+            });
+            
+            // Remove body classes that might disable scrolling
+            document.body.classList.remove('overflow-hidden');
+        """)
+        print("🔧 Attempted JavaScript modal removal")
+        
+        return False
+    except Exception as e:
+        print(f"⚠️ Error handling LinkedIn popup: {e}")
+        return False
+
+# General function to close other popups
+def close_popups():
+    try:
+        # Try to close the LinkedIn signup modal first
+        signup_closed = close_linkedin_popup()
+        
+        # Handle other types of popups
+        popup_elements = [
+            '.artdeco-toasts_toasts',
+            '.artdeco-toast-item__dismiss',
+            '.msg-overlay-bubble-header__controls button',
+            '.consent-page button',
+            '//button[contains(text(), "Dismiss")]',
+            '//button[contains(text(), "Not now")]',
+            '//button[contains(text(), "No, thanks")]'
+        ]
+        
+        for selector in popup_elements:
+            try:
+                if selector.startswith('//'):
+                    elements = driver.find_elements(By.XPATH, selector)
+                else:
+                    elements = driver.find_elements(By.CSS_SELECTOR, selector)
+                
+                for element in elements:
+                    if element.is_displayed():
+                        driver.execute_script("arguments[0].click();", element)
+                        print(f"❌ Closed popup: {selector}")
+                        human_delay(0.5, 1)
+            except:
+                continue
+                
+        # Use JavaScript as fallback for toasts
+        driver.execute_script("""
+            var toasts = document.querySelector('.artdeco-toasts_toasts');
+            if (toasts) toasts.style.display='none';
+            
+            var overlays = document.querySelectorAll('.artdeco-modal');
+            overlays.forEach(function(overlay) {
+                if (overlay.style.display !== 'none') overlay.style.display='none';
+            });
+        """)
+    except Exception as e:
+        error_message = f"Error handling popups: {str(e)}"
+        print(error_message)
+        notify_failure(error_message, "close_popups")
+
+import json
+from bs4 import BeautifulSoup
+import html
+
+def extract_job_description(html_content):
+    soup = BeautifulSoup(html_content, "html.parser")
+    script_tag = soup.find("script", type="application/ld+json")
+    
+    if not script_tag:
+        return None
+
+    try:
+        job_json = json.loads(script_tag.string)
+        raw_description = job_json.get("description", "")
+        # Convert HTML entities (e.g., &lt;p&gt;) to actual characters
+        decoded_description = html.unescape(raw_description)
+        return decoded_description.strip()
+    except json.JSONDecodeError:
+        return None
+
+async def parse_url(url):
+    client = Client(impersonate=Impersonate.Firefox136)
+    resp = await client.get(url)
+    print("Status Code: ", resp.status_code)
+    
+    content = await resp.text()
+
+    soup = BeautifulSoup(content, "html.parser")
+    description = extract_job_description(content)
+
+    try:
+        external_url = soup.find('code', id='applyUrl')
+        if external_url:
+            external_url = external_url.string
+            external_url = external_url.split("url=")[-1]
+        else:
+            external_url = url
+    except:
+        external_url = url
+
+    return external_url, description
+
+
+def get_external_url(url):
+    try:
+        return asyncio.run(parse_url(url))
+    except RuntimeError:
+        # If event loop already running
+        loop = asyncio.get_event_loop()
+        task = loop.create_task(parse_url(url))
+        return loop.run_until_complete(task)
+
+
+def extract_job_details(html):
+    try:
+        soup = BeautifulSoup(html, 'html.parser')
+        job_listings = []
+        
+        # Debug counter for tracking matching results
+        total_jobs = 0
+        matching_jobs = 0
+
+        for job in soup.select('ul.jobs-search__results-list li'):
+            total_jobs += 1
+            job_data = {}
+
+            title_tag = job.select_one('h3.base-search-card__title')
+            job_data['title'] = title_tag.get_text(strip=True) if title_tag else None
+
+            company_tag = job.select_one('h4.base-search-card__subtitle a')
+            company_name = company_tag.get_text(strip=True) if company_tag else None
+            job_data['company'] = company_name
+            
+            # Print for debugging
+            clean_company_name = clean_name(company_name)
+            company_match = is_company_in_list(company_name)
+            
+            # Skip jobs from companies not in our target list
+            if not company_match:
+                continue
+                
+            matching_jobs += 1
+
+            location_tag = job.select_one('span.job-search-card__location')
+            job_data['location'] = location_tag.get_text(strip=True) if location_tag else None
+
+            time_tag = job.select_one('time')
+            job_data['posted_time'] = time_tag.get_text(strip=True) if time_tag else None
+            job_data['posted_datetime'] = time_tag.get('datetime') if time_tag else None
+
+            link_tag = job.select_one('a.base-card__full-link')
+            url = link_tag.get('href') if link_tag else None
+
+            logo_tag = job.select_one(".artdeco-entity-image")
+            job_data['logo_url'] = logo_tag.get('src') if logo_tag else None
+
+            external_url, descrition  = get_external_url(url)
+            job_data['job_url'] = external_url
+            job_data['description'] = descrition
+            job_listings.append(job_data)
+
+        print(f"📊 Extraction stats: {matching_jobs}/{total_jobs} jobs matched target companies")
+        return job_listings
+    except Exception as e:
+        error_message = f"Failed to extract job details: {str(e)}"
+        notify_failure(error_message, "extract_job_details")
         return []
 
-    job_cards = job_element.find_all('li')
-    print(f"Total Jobs Extracted: {len(job_cards)}\n")
+def check_page_content_updated(previous_job_count):
+    """Check if page content has been updated after clicking 'See more'."""
+    try:
+        # Count current visible job cards
+        current_job_cards = driver.find_elements(By.CSS_SELECTOR, 
+            ".job-card-container--clickable, .jobs-search__results-list li")
+        current_count = len(current_job_cards)
+        
+        # Check if we have more jobs than before
+        if current_count > previous_job_count:
+            print(f"✅ Page updated: {previous_job_count} → {current_count} jobs")
+            return True, current_count
+        else:
+            print(f"❌ Page did not update: Still showing {current_count} jobs")
+            return False, current_count
+    except Exception as e:
+        print(f"⚠️ Error checking page content: {e}")
+        return False, previous_job_count
 
-    all_jobs = []
-
-    for job in job_cards:
+def insert_jobs_to_db(job_listings):
+    """Delete all jobs with data_source='linkedin' and insert new jobs"""
+    if not job_listings:
+        logger.info("No jobs to insert into database")
+        return 0
+    
+    inserted_count = 0
+    
+    try:
+        session = Session()
         try:
-            title_element = job.find('a', class_='JobCard_jobTitle__GLyJ1')
-            title = title_element.get_text(strip=True)
-            job_url = title_element['href']
-            if not job_url.startswith("http"):
-                job_url = f"https://www.glassdoor.co.uk{job_url}"
-
-            company_element = job.find('span', class_='EmployerProfile_compactEmployerName__9MGcV')
-            company = company_element.get_text(strip=True) if company_element else "N/A"
-
-            location_element = job.find('div', class_='JobCard_location__Ds1fM')
-            location = location_element.get_text(strip=True) if location_element else "N/A"
-
-            salary_element = job.find('div', class_='JobCard_salaryEstimate__QpbTW')
-            salary = salary_element.get_text(strip=True) if salary_element else "N/A"
-
-            date_posted_element = job.find('div', class_='JobCard_listingAge__jJsuc')
-            date_posted = date_posted_element.get_text(strip=True) if date_posted_element else "N/A"
-
-            job_type = "Easy Apply" if job.find('div', class_='JobCard_easyApplyTag__5vlo5') else "Standard"
-
-            logo_img = job.find('div', class_='EmployerProfile_profileContainer__63w3R')
-            company_logo = logo_img.find('img')['src'] if logo_img and logo_img.find('img') else "N/A"
-
-            if company.lower() in company_list:
-                job_data = {
-                    "Title": title,
-                    "Company": company,
-                    "Location": location,
-                    "Salary": salary,
-                    "Job Type": job_type,
-                    "URL": job_url,
-                    "Date Posted": date_posted,
-                    "Company Logo": company_logo
-                }
-
-                all_jobs.append(job_data)
+            # Delete all existing records with data_source='linkedin'
+            logger.info("Deleting all existing LinkedIn jobs from database...")
+            deleted_count = session.query(Job).filter(Job.data_source == 'linkedin').delete()
+            logger.info(f"Deleted {deleted_count} existing LinkedIn jobs")
+            
+            # Insert new records
+            logger.info(f"Inserting {len(job_listings)} new jobs...")
+            for job in job_listings:
+                try:
+                    # Skip jobs with certain keywords in salary if needed
+                    salary = job.get('salary', '')
+                    
+                    # Create new job object
+                    new_job = Job(
+                        job_title=job.get('title', ''),
+                        company_name=job.get('company', ''),
+                        company_logo=job.get('logo_url', ''),
+                        salary=job.get('salary', '') if job.get('salary') else None,
+                        posted_date=job.get('posted_date', ''),
+                        experience='Full-time',  # Default or extract from job data if available
+                        location=job.get('location', '') if job.get('location') else None,
+                        apply_link=job.get('job_url', ''),
+                        descrition=job.get('descrition', ''),
+                        data_source='linkedin'
+                    )
+                    
+                    session.add(new_job)
+                    inserted_count += 1
+                except Exception as e:
+                    logger.error(f"Error processing job object: {str(e)}")
+            
+            # Commit the changes
+            session.commit()
+            logger.info(f"Successfully inserted {inserted_count} new jobs")
+            
         except Exception as e:
-            print(f"Skipping job due to error: {e}")
-            continue
-
-    print(f"✅ Total jobs collected: {len(all_jobs)}\n")
-    return all_jobs
-
-urls = {
-    "england": "https://www.glassdoor.co.uk/Job/england-uk-jobs-SRCH_IL.0,10_IS7287.htm?maxSalary=9000000&minSalary=250000",
-    "scotland": "https://www.glassdoor.co.uk/Job/scotland-uk-jobs-SRCH_IL.0,11_IS7289.htm?maxSalary=9000000&minSalary=250000",
-    "wales": "https://www.glassdoor.co.uk/Job/wales-uk-jobs-SRCH_IL.0,8_IS7290.htm?maxSalary=9000000&minSalary=250000",
-    "northern_ireland": "https://www.glassdoor.co.uk/Job/northern-ireland-uk-jobs-SRCH_IL.0,19_IS7288.htm?maxSalary=9000000&minSalary=250000"
-}
-
-with sync_playwright() as p:
-    browser = p.chromium.launch(headless=False)
-    context = browser.new_context(
-        locale="en-GB,en;q=0.5",
-        geolocation={"latitude": 51.509865, "longitude": -0.118092},
-        permissions=["geolocation"],
-        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
-    )
-    page = context.new_page()
-
-    all_data = []
-
-    for region, url in urls.items():
-        print(f"\n🚀 Scraping jobs for: {region.upper()}")
-        page.goto(url)
-        time.sleep(3)
-
-        prev_count = 0
-        stable_rounds = 0
+            error_message = f"Database operation error: {str(e)}"
+            logger.error(error_message)
+            notify_failure(error_message, "insert_jobs_to_db")
+            session.rollback()
+        finally:
+            session.close()
+    except Exception as e:
+        error_message = f"Database session error: {str(e)}"
+        logger.error(error_message)
+        notify_failure(error_message, "insert_jobs_to_db")
+    
+    return inserted_count
+	
+def load_all_jobs():
+    global chat_id  # Declare chat_id as global within this function
+    
+    try:
+        jobs_found = 0
+        consecutive_no_button_found = 0
+        consecutive_page_not_updated = 0
+        max_no_button_attempts = 3
+        max_no_update_attempts = 2
+        
+        total_jobs = []
+        processed_page_count = 0
 
         while True:
+            close_popups()
+            
+            # Scroll smoothly in chunks for more human-like behavior
+            scroll_height = driver.execute_script("return document.body.scrollHeight")
+            current_position = driver.execute_script("return window.pageYOffset")
+            step = random.randint(300, 700)
+            
+            while current_position < scroll_height:
+                driver.execute_script(f"window.scrollTo(0, {current_position + step});")
+                current_position += step
+                human_delay(0.3, 0.7)
+            
+            # Count visible job cards to track progress
+            job_cards = driver.find_elements(By.CSS_SELECTOR, 
+                ".job-card-container--clickable, .jobs-search__results-list li")
+            current_job_count = len(job_cards)
+            
+            page_source = driver.page_source
+            jobs = extract_job_details(page_source)
+            
+            # Add new jobs to our list
+            total_jobs.extend(jobs)
+            processed_page_count += 1
+            
+            # Every few pages, deduplicate and save results
+            if processed_page_count % 3 == 0:
+                # Remove duplicates before saving
+                total_jobs = remove_duplicates(total_jobs)
+                
+                with open("linkedin_filtered_jobs.json", "w", encoding="utf-8") as json_file:
+                    json.dump(total_jobs, json_file, indent=2, ensure_ascii=False)
+                print(f"💾 Saved {len(total_jobs)} unique jobs to JSON (after {processed_page_count} pages)")
+
+            # Print progress only if we found more jobs
+            if current_job_count > jobs_found:
+                print(f"📊 Found {current_job_count} total jobs, {len(total_jobs)} matching companies")
+                jobs_found = current_job_count
+            
+            # Try to find and click "See more" button
+            button_found = False
+            
             try:
-                close_btn = page.query_selector("button.CloseButton")
-                if close_btn:
-                    close_btn.click()
-                    time.sleep(1)
-            except:
-                pass
-
-            for _ in range(3):
-                page.mouse.wheel(0, 2000)
-                time.sleep(1)
-
-            content = page.content()
-            soup = BeautifulSoup(content, 'html.parser')
-            current_jobs = soup.select("ul.JobsList_jobsList__lqjTr li")
-            current_count = len(current_jobs)
-            print(f"Currently loaded: {current_count} jobs")
-
-            try:
-                button = page.query_selector('button[data-test="load-more"]')
-                if button:
-                    print("Clicking 'Show more jobs'...")
-                    button.click()
-                    time.sleep(random.uniform(1.5, 4))
+                # Try different approaches to find the "See more" button
+                see_more_selectors = [
+                    "//button[contains(@class, 'infinite-scroller__show-more')]",
+                    "//button[contains(text(), 'See more')]",
+                    "//button[contains(text(), 'Show more')]",
+                    ".infinite-scroller__show-more-button",
+                    ".more-jobs-button"
+                ]
+                
+                see_more_button = None
+                for selector in see_more_selectors:
+                    elements = []
+                    try:
+                        if selector.startswith("//"):
+                            elements = driver.find_elements(By.XPATH, selector)
+                        else:
+                            elements = driver.find_elements(By.CSS_SELECTOR, selector)
+                        
+                        if elements and len(elements) > 0 and elements[0].is_displayed():
+                            see_more_button = elements[0]
+                            button_found = True
+                            break
+                    except:
+                        continue
+                
+                if see_more_button:
+                    # Make sure the button is in view and wait for it to be clickable
+                    driver.execute_script("arguments[0].scrollIntoView({block: 'center', behavior: 'smooth'});", see_more_button)
+                    human_delay(1, 2)
+                    
+                    # Remember job count before clicking
+                    pre_click_job_count = current_job_count
+                    
+                    # Try JavaScript click which is more reliable
+                    driver.execute_script("arguments[0].click();", see_more_button)
+                    print("🔄 Loading more jobs...")
+                    human_delay(3, 5)  # Give more time to load
+                    
+                    # Check if the page has actually been updated with new content
+                    page_updated, new_job_count = check_page_content_updated(pre_click_job_count)
+                    
+                    if page_updated:
+                        consecutive_no_button_found = 0  # Reset button counter on success
+                        consecutive_page_not_updated = 0  # Reset update counter on success
+                    else:
+                        consecutive_page_not_updated += 1
+                        print(f"⚠️ Page didn't update after clicking 'See more' ({consecutive_page_not_updated}/{max_no_update_attempts})")
+                        
+                        # If we've had too many consecutive non-updates, assume we're done
+                        if consecutive_page_not_updated >= max_no_update_attempts:
+                            print("⛔ Too many failed page updates. Breaking loop.")
+                            break
                 else:
-                    print("No 'Show more jobs' button found.")
-            except:
-                pass
+                    consecutive_no_button_found += 1
+                    print(f"⚠️ No 'See more' button found (attempt {consecutive_no_button_found}/{max_no_button_attempts})")
+                    human_delay(2, 3)  # Wait a bit and try again with a fresh scroll
+                    
+            except (ElementClickInterceptedException, StaleElementReferenceException) as e:
+                print(f"⚠️ Click attempt failed: {e}")
+                consecutive_no_button_found += 1
+                human_delay(1, 2)
 
-            if current_count == prev_count:
-                stable_rounds += 1
-                if stable_rounds >= 3:
-                    print("No new jobs loaded after several attempts.")
-                    break
-            else:
-                stable_rounds = 0
-                prev_count = current_count
+            except Exception as e:
+                print(f"⚠️ Error during loading: {e}")
+                consecutive_no_button_found += 1
+                human_delay(1, 2)
+            
+            # If we haven't found the button for several consecutive attempts, assume we've reached the end
+            if consecutive_no_button_found >= max_no_button_attempts:
+                print(f"✅ No more 'See more' buttons found after {max_no_button_attempts} attempts. Done loading jobs.")
+                break
+        
+        # Final job count
+        final_count = len(driver.find_elements(By.CSS_SELECTOR, 
+            ".job-card-container--clickable, .jobs-search__results-list li"))
+        
+        # Final deduplication
+        total_jobs = remove_duplicates(total_jobs)
 
-        final_content = page.content()
-        region_jobs = extract_data(final_content)
-        all_data.extend(region_jobs)
+        insert_jobs_to_db(total_jobs)
+        
+        print(f"🏁 Total jobs loaded: {final_count}")
+        print(f"🏁 Filtered jobs (matching companies): {len(total_jobs)}")
 
-    with open("glassdoor_all_uk.json", "w+", encoding="utf-8") as final_file:
-        json.dump(all_data, final_file, indent=2)
+        # Final save to JSON
+        with open("linkedin_filtered_jobs.json", "w", encoding="utf-8") as json_file:
+            json.dump(total_jobs, json_file, indent=2, ensure_ascii=False)
 
-    browser.close()
+        # Send success notification
+        if chat_id is None:
+            chat_id = get_chat_id(TOKEN)
+        if chat_id:
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            message = f"✅ LINKEDIN SCRAPER SUCCESS at {timestamp}\nTotal jobs loaded: {final_count}\nMatching companies: {len(total_jobs)}"
+            send_message(TOKEN, message, chat_id)
+
+        return len(total_jobs)
+    except Exception as e:
+        error_message = f"Error in load_all_jobs: {str(e)}"
+        notify_failure(error_message, "load_all_jobs")
+        return 0
+
+# Optional - Function to deduplicate an existing JSON file
+def deduplicate_existing_json(filepath="linkedin_filtered_jobs.json"):
+    """Removes duplicates from an existing JSON file."""
+    global chat_id  # Declare chat_id as global within this function
+    
+    try:
+        print(f"Deduplicating existing file: {filepath}")
+        
+        # Load existing data
+        with open(filepath, 'r', encoding='utf-8') as file:
+            existing_jobs = json.load(file)
+            
+        original_count = len(existing_jobs)
+        print(f"Original job count: {original_count}")
+        
+        # Remove duplicates
+        unique_jobs = remove_duplicates(existing_jobs)
+        
+        # Save deduped data
+        with open(filepath, 'w', encoding='utf-8') as file:
+            json.dump(unique_jobs, file, indent=2, ensure_ascii=False)
+            
+        print(f"Deduplication complete: {original_count} → {len(unique_jobs)} jobs")
+        return len(unique_jobs)
+    except Exception as e:
+        error_message = f"Error in deduplicate_existing_json: {str(e)}"
+        print(error_message)
+        notify_failure(error_message, "deduplicate_existing_json")
+        return 0
+
+try:
+    # Initialize chat_id early to avoid scope issues
+    if chat_id is None:
+        chat_id = get_chat_id(TOKEN)
+
+    setup_database()
+    # Run the main scraping process
+    load_all_jobs()
+except Exception as e:
+    error_message = f"Critical failure in main execution: {str(e)}"
+    notify_failure(error_message, "main_execution")
+finally:
+    # Always close the driver
+    try:
+        driver.quit()
+        print("Browser closed")
+    except:
+        pass
