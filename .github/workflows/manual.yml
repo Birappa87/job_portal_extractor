@@ -1,8 +1,9 @@
 name: WorkFlow for NHS script
 
 on:
+  push:            # <--- add this line to trigger on any push
   schedule:
-    - cron: '*/5 * * * *' # Every 2 minutes
+    - cron: '*/5 * * * *' # Every 5 minutes
 
 jobs:
   build:
@@ -10,12 +11,12 @@ jobs:
     steps:
 
       - name: checkout repo content
-        uses: actions/checkout@v2 # checkout the repository content to github runner
+        uses: actions/checkout@v2
 
       - name: setup python
         uses: actions/setup-python@v4
         with:
-          python-version: '3.12' # install the python version needed
+          python-version: '3.12'
           
       - name: install python packages
         run: |
@@ -24,7 +25,7 @@ jobs:
           pip install -r requirements.txt
           python -m playwright install
           
-      - name: execute py script # run main.py
+      - name: execute py script
         run: python nhs.py
           
       - name: commit files
@@ -38,4 +39,4 @@ jobs:
         uses: ad-m/github-push-action@v0.6.0
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
-          branch: main 
+          branch: main
