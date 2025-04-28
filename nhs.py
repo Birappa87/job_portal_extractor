@@ -12,6 +12,7 @@ from sqlalchemy import create_engine, Column, Integer, String, Date, Text, inspe
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 from dateutil import parser
+import time
 
 # Configure logging
 logging.basicConfig(
@@ -21,7 +22,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Constants
-BASE_URL = "https://www.jobs.nhs.uk/candidate/search/results"
+BASE_URL = "https://www.jobs.nhs.uk/candidate/search/results?workingPattern=full-time&contractType=Permanent&payRange=30-40%2C40-50%2C50-60%2C60-70%2C70-80%2C80-90%2C90-100%2C100&language=en#"
 HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
 }
@@ -44,12 +45,13 @@ class Job(Base):
     id = Column(Integer, primary_key=True)
     job_title = Column(String(255), nullable=False)
     company_name = Column(String(255), nullable=False)
-    company_logo = Column(Text, nullable=True)  # Changed to Text type
+    company_logo = Column(Text, nullable=True)
     salary = Column(String(100), nullable=True)
     posted_date = Column(Text, nullable=False)
     experience = Column(String(100), nullable=True)
     location = Column(String(255), nullable=True)
-    apply_link = Column(Text, nullable=False)  # Changed to Text type
+    apply_link = Column(Text, nullable=False)
+    description = Column(Text, nullable=True)  # Added description column
     data_source = Column(String(180), nullable=False)
 
 # Telegram setup
@@ -136,7 +138,7 @@ def get_company_list():
     """Loads and cleans the list of target companies from CSV."""
     global company_list
     try:
-        df = pd.read_csv(r"C:\\Users\\birap\\Downloads\\2025-04-04_-_Worker_and_Temporary_Worker.csv")
+        df = pd.read_csv(r"data/2025-04-04_-_Worker_and_Temporary_Worker.csv")
         df['Organisation Name'] = df['Organisation Name'].apply(clean_name)
         company_list = list(df['Organisation Name'])
         logger.info(f"Loaded {len(company_list)} companies from CSV")
@@ -186,6 +188,40 @@ def parse_date(date_str):
         # If parsing fails, return current date
         return datetime.now().date()
 
+def extract_description(url):
+    """Extract job description HTML from the job detail page."""
+    try:
+        logger.info(f"Fetching job description from: {url}")
+        response = requests.get(url, headers=HEADERS)
+        response.raise_for_status()
+        
+        soup = BeautifulSoup(response.content, 'html.parser')
+        
+        # Look for the specific class you mentioned
+        description_element = soup.find('div', {'class': 'nhsuk-grid-column-two-thirds wrap-paragraphs'})
+        
+        if description_element:
+            # Remove any script tags
+            for script in description_element.find_all('script'):
+                script.decompose()
+                
+            # Return the full HTML content as a string
+            return str(description_element)
+        
+        # Fallback to other potential description containers
+        description_section = soup.find('section', {'id': 'job-overview'})
+        if description_section:
+            for script in description_section.find_all('script'):
+                script.decompose()
+            return str(description_section)
+            
+        # If no description found
+        return "<div>Description not available</div>"
+    except Exception as e:
+        error_message = f"Failed to extract job description: {str(e)}"
+        logger.error(error_message)
+        return "<div>Failed to retrieve description</div>"
+
 def truncate_string(text, max_length):
     """Safely truncate a string to specified maximum length."""
     if text and len(text) > max_length:
@@ -224,6 +260,9 @@ def insert_jobs_to_db(job_listings):
 
                     if ('hour' in salary.lower()) or ('day' in salary.lower()):
                         continue
+                    
+                    # Get job description
+                    description = job.get('description', 'Description not provided')
 
                     new_job = Job(
                         job_title=job_title,
@@ -234,6 +273,7 @@ def insert_jobs_to_db(job_listings):
                         experience=experience,
                         location=location,
                         apply_link=job.get('url', ''),
+                        description=description,  # Add the description
                         data_source='nhs'
                     )
                     
@@ -289,9 +329,19 @@ def scrape_all_pages():
             # Filter for target companies
             for job in jobs:
                 if job.get('is_target_company', False):
+                    # Fetch and add the job description
+                    job_url = job.get('url', '')
+                    if job_url:
+                        # Add delay to avoid being rate-limited
+                        time.sleep(1)
+                        job['description'] = extract_description(job_url)
                     matched_jobs.append(job)
             
             page += 1
+            
+            # Break after first page for testing
+            if page > 10:
+                break
             
         except requests.RequestException as e:
             error_message = f"Error fetching page {page}: {str(e)}"
@@ -394,40 +444,6 @@ def parse_jobs(soup):
     
     return jobs
 
-def save_to_json(jobs):
-    """Save the scraped jobs to a JSON file."""
-    try:
-        with open(OUTPUT_FILE, 'w', encoding='utf-8') as f:
-            json.dump(jobs, f, indent=2, ensure_ascii=False)
-        logger.info(f"Successfully saved {len(jobs)} jobs to {OUTPUT_FILE}")
-        return True
-    except Exception as e:
-        error_message = f"Error saving jobs to JSON file: {str(e)}"
-        logger.error(error_message)
-        notify_failure(error_message, "save_to_json")
-        return False
-
-def save_to_csv(jobs):
-    """Save the scraped jobs to a CSV file."""
-    try:
-        df = pd.DataFrame(jobs)
-        columns = [
-            "title", "job_type", "salary", "location", "contract_type",
-            "url", "employer", "posting_date", "closing_date", "company_logo", 
-            "apply_link", "country", "source", "ingestion_timestamp", "job_id"
-        ]
-        existing_columns = [col for col in columns if col in df.columns]
-        df = df[existing_columns]
-        os.makedirs("data", exist_ok=True)
-        df.to_csv('data/nhs_data.csv', index=False)
-        logger.info(f"Successfully saved {len(jobs)} jobs to CSV")
-        return True
-    except Exception as e:
-        error_message = f"Error saving jobs to CSV file: {str(e)}"
-        logger.error(error_message)
-        notify_failure(error_message, "save_to_csv")
-        return False
-
 def main():
     """Main function to run the scraper."""
     global chat_id, TOKEN
@@ -454,12 +470,6 @@ def main():
                 logger.error(error_message)
                 notify_failure(error_message, "data_collection")
                 return
-            
-            # Save to JSON file
-            save_to_json(all_jobs)
-            
-            # Save to CSV file
-            save_to_csv(all_jobs)
             
             # Insert jobs into database
             inserted_count = insert_jobs_to_db(matched_jobs)
