@@ -6,6 +6,8 @@ import re
 import pandas as pd
 import requests
 import subprocess
+import tempfile
+import uuid
 from datetime import datetime
 from bs4 import BeautifulSoup
 from selenium import webdriver
@@ -25,11 +27,14 @@ from bs4 import BeautifulSoup
 import logging
 from rnet import Client, Impersonate
 
-user_data_dir = os.path.join(os.getcwd(), "selenium_user_data_" + str(int(time.time())))
+
 TOKEN = '7844666863:AAF0fTu1EqWC1v55oC25TVzSjClSuxkO2X4'
 chat_id = None
 company_list = []
-company_name_map = {}  # New dictionary to store fuzzy matching results
+company_name_map = {}
+
+temp_dir = os.path.join(tempfile.gettempdir(), f"selenium_{uuid.uuid4().hex}")
+os.makedirs(temp_dir, exist_ok=True)
 
 # Configure logging
 logging.basicConfig(
@@ -215,6 +220,11 @@ try:
     options.add_argument("--lang=en-US")
     options.add_experimental_option("excludeSwitches", ["enable-automation"])
     options.add_experimental_option("useAutomationExtension", False)
+    options.add_argument(f"--user-data-dir={temp_dir}")
+    
+    # For GitHub Actions, we need to specify these additional options
+    options.add_argument("--disable-gpu")
+    options.add_argument("--window-size=1920,1080")
 
     driver = webdriver.Chrome(service=webdriver.ChromeService(ChromeDriverManager().install()), options=options)
 
@@ -759,7 +769,6 @@ try:
 
     setup_database()
     
-    kill_chrome_processes()
     load_all_jobs()
 except Exception as e:
     error_message = f"Critical failure in main execution: {str(e)}"
