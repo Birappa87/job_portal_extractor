@@ -5,6 +5,7 @@ import os
 import re
 import pandas as pd
 import requests
+import subprocess
 from datetime import datetime
 from bs4 import BeautifulSoup
 from selenium import webdriver
@@ -141,6 +142,14 @@ def get_company_list():
         notify_failure(error_message, "get_company_list")
         raise
 
+def kill_chrome_processes():
+    try:
+        subprocess.run(["pkill", "-f", "chrome"], stderr=subprocess.DEVNULL)
+        subprocess.run(["pkill", "-f", "chromedriver"], stderr=subprocess.DEVNULL)
+        time.sleep(2)  # Give OS time to release resources
+    except Exception as e:
+        print(f"Error killing processes: {e}")
+
 def is_company_in_list(company_name):
     """Checks if a company name is in the target list using improved matching."""
     try:
@@ -206,7 +215,6 @@ try:
     options.add_argument("--lang=en-US")
     options.add_experimental_option("excludeSwitches", ["enable-automation"])
     options.add_experimental_option("useAutomationExtension", False)
-    options.add_argument(f"--user-data-dir={user_data_dir}")
 
     driver = webdriver.Chrome(service=webdriver.ChromeService(ChromeDriverManager().install()), options=options)
 
@@ -214,7 +222,6 @@ try:
     stealth(driver,
         languages=["en-US", "en"],
         vendor="Google Inc.",
-        platform="Win32",
         webgl_vendor="Intel Inc.",
         renderer="Intel Iris OpenGL Engine",
         fix_hairline=True,
@@ -751,7 +758,8 @@ try:
         chat_id = get_chat_id(TOKEN)
 
     setup_database()
-    # Run the main scraping process
+    
+    kill_chrome_processes()
     load_all_jobs()
 except Exception as e:
     error_message = f"Critical failure in main execution: {str(e)}"
