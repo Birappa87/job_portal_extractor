@@ -24,7 +24,7 @@ from bs4 import BeautifulSoup
 import logging
 from rnet import Client, Impersonate
 
-
+user_data_dir = os.path.join(os.getcwd(), "selenium_user_data_" + str(int(time.time())))
 TOKEN = '7844666863:AAF0fTu1EqWC1v55oC25TVzSjClSuxkO2X4'
 chat_id = None
 company_list = []
@@ -206,7 +206,8 @@ try:
     options.add_argument("--lang=en-US")
     options.add_experimental_option("excludeSwitches", ["enable-automation"])
     options.add_experimental_option("useAutomationExtension", False)
-
+    chrome_options.add_argument(f"--user-data-dir={user_data_dir}")
+    
     driver = webdriver.Chrome(service=webdriver.ChromeService(ChromeDriverManager().install()), options=options)
 
     # Apply stealth settings
