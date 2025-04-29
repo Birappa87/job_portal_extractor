@@ -121,7 +121,7 @@ def notify_failure(error_message, location="Unknown"):
 def get_company_list():
     global company_list
     try:
-        df = pd.read_csv(r"C:\Users\birap\Downloads\2025-04-04_-_Worker_and_Temporary_Worker.csv")
+        df = pd.read_csv(r"data/2025-04-04_-_Worker_and_Temporary_Worker.csv")
         company_list = list(df['Organisation Name'])
     except Exception as e:
         error_message = f"Failed to load company list: {str(e)}"
