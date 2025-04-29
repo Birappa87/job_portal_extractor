@@ -206,8 +206,8 @@ try:
     options.add_argument("--lang=en-US")
     options.add_experimental_option("excludeSwitches", ["enable-automation"])
     options.add_experimental_option("useAutomationExtension", False)
-    chrome_options.add_argument(f"--user-data-dir={user_data_dir}")
-    
+    options.add_argument(f"--user-data-dir={user_data_dir}")
+
     driver = webdriver.Chrome(service=webdriver.ChromeService(ChromeDriverManager().install()), options=options)
 
     # Apply stealth settings
