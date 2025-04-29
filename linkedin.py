@@ -24,7 +24,7 @@ from bs4 import BeautifulSoup
 import logging
 from rnet import Client, Impersonate
 
-# Global variables for Telegram notifications
+
 TOKEN = '7844666863:AAF0fTu1EqWC1v55oC25TVzSjClSuxkO2X4'
 chat_id = None
 company_list = []
@@ -42,7 +42,7 @@ Base = declarative_base()
 engine = create_engine('postgresql://postgres.gncxzrslsmbwyhefawer:tRIOI1iU59gyK1nk@aws-0-eu-west-2.pooler.supabase.com:6543/postgres')
 Session = sessionmaker(bind=engine)
 
-# Define the database model
+
 class Job(Base):
     __tablename__ = 'jobs'
     
@@ -108,17 +108,13 @@ def notify_failure(error_message, location="Unknown"):
         print(f"Failed to send failure notification: {e}")
 
 def clean_name(name):
-    """Cleans a company name for matching."""
+    """Removes special characters from a company name, keeps the rest the same."""
     try:
         if not name:
             return ""
-        name = str(name).strip().lower()
-        # Remove common legal suffixes
-        name = re.sub(r'\s+(ltd|limited|inc|incorporated|plc|llc|llp|co|corp|corporation)\.?$', '', name)
-        # Remove non-alphanumeric characters except spaces
-        name = re.sub(r'[^a-z0-9\s]', '', name)
-        # Replace multiple spaces with a single space
-        name = re.sub(r'\s+', ' ', name)
+        name = str(name).strip()
+        # Remove special characters but keep letters, numbers, and spaces
+        name = re.sub(r'[^A-Za-z0-9\s]', '', name)
         return name.strip()
     except Exception as e:
         error_message = f"Failed to clean name: {str(e)}"
@@ -129,8 +125,7 @@ def get_company_list():
     """Loads and cleans the list of target companies from CSV."""
     global company_list, company_name_map
     try:
-        df = pd.read_csv(r"C:\\Users\\birap\\Downloads\\2025-04-04_-_Worker_and_Temporary_Worker.csv")
-        # Clean company names and create mapping dictionary
+        df = pd.read_csv(r"data/2025-04-04_-_Worker_and_Temporary_Worker.csv")
         df['Clean Name'] = df['Organisation Name'].apply(clean_name)
         company_list = list(df['Clean Name'])
         
@@ -239,7 +234,7 @@ try:
     # Load company list before starting
     get_company_list()
     
-    URL = "https://www.linkedin.com/jobs/search/?keywords=&location=United%20Kingdom&geoId=101165590&f_JT=F&f_E=4&f_SB2=41&f_TPR=r604800&f_WT=1%2C3"
+    URL = "https://www.linkedin.com/jobs/search/?currentJobId=4215342655&f_E=4&f_JT=F&f_SB2=42&f_TPR=r604800&f_WT=1%2C3&geoId=101165590&keywords=&location=United%20Kingdom&origin=JOB_SEARCH_PAGE_JOB_FILTER"
     driver.get(URL)
     human_delay(4, 7)
 
@@ -475,10 +470,13 @@ def extract_job_details(html):
             logo_tag = job.select_one(".artdeco-entity-image")
             job_data['logo_url'] = logo_tag.get('src') if logo_tag else None
 
-            external_url, descrition  = get_external_url(url)
+            external_url, description  = get_external_url(url)
             job_data['job_url'] = external_url
-            job_data['description'] = descrition
+            job_data['description'] = description
             job_listings.append(job_data)
+
+            if total_jobs == 5:
+                break
 
         print(f"📊 Extraction stats: {matching_jobs}/{total_jobs} jobs matched target companies")
         return job_listings
@@ -539,7 +537,7 @@ def insert_jobs_to_db(job_listings):
                         experience='Full-time',  # Default or extract from job data if available
                         location=job.get('location', '') if job.get('location') else None,
                         apply_link=job.get('job_url', ''),
-                        descrition=job.get('descrition', ''),
+                        description=job.get('description', ''),
                         data_source='linkedin'
                     )
                     

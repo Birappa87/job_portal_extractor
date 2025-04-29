@@ -51,7 +51,7 @@ class Job(Base):
     experience = Column(String(100), nullable=True)
     location = Column(String(255), nullable=True)
     apply_link = Column(Text, nullable=False)
-    description = Column(Text, nullable=True)  # Added description column
+    description = Column(Text, nullable=True)
     data_source = Column(String(180), nullable=False)
 
 # Telegram setup
