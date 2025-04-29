@@ -142,7 +142,6 @@ def get_company_list():
         notify_failure(error_message, "get_company_list")
         raise
 
-
 def is_company_in_list(company_name):
     """Checks if a company name is in the target list using improved matching."""
     try:
