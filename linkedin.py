@@ -5,35 +5,25 @@ import os
 import re
 import pandas as pd
 import requests
-import subprocess
-import tempfile
 import uuid
+import tempfile
+import asyncio
 from datetime import datetime
 from bs4 import BeautifulSoup
-from selenium import webdriver
-from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.common.by import By
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium_stealth import stealth
-from selenium.common.exceptions import NoSuchElementException, ElementClickInterceptedException, TimeoutException, StaleElementReferenceException
-from webdriver_manager.chrome import ChromeDriverManager
+import logging
+import html
+from rnet import Client, Impersonate
+from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
 from sqlalchemy import create_engine, Column, Integer, String, Text, Date
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
-import asyncio
-from bs4 import BeautifulSoup
-import logging
-from rnet import Client, Impersonate
-
 
 TOKEN = '7844666863:AAF0fTu1EqWC1v55oC25TVzSjClSuxkO2X4'
 chat_id = None
 company_list = []
 company_name_map = {}
 
-temp_dir = os.path.join(tempfile.gettempdir(), f"selenium_{uuid.uuid4().hex}")
+temp_dir = os.path.join(tempfile.gettempdir(), f"playwright_{uuid.uuid4().hex}")
 os.makedirs(temp_dir, exist_ok=True)
 
 # Configure logging
@@ -64,6 +54,7 @@ class Job(Base):
     description = Column(Text, nullable=True)
     data_source = Column(String(180), nullable=False)
 
+
 # Function to ensure database tables exist
 def setup_database():
     """Create database tables if they don't exist"""
@@ -88,6 +79,7 @@ def get_chat_id(TOKEN: str) -> str:
         print(f"Failed to get chat ID: {e}")
         return None
 
+
 def send_message(TOKEN: str, message: str, chat_id: str):
     """Sends a message using Telegram bot."""
     try:
@@ -99,6 +91,7 @@ def send_message(TOKEN: str, message: str, chat_id: str):
             print(f"Message not sent. Status code: {response.status_code}")
     except Exception as e:
         print(f"Failed to send message: {e}")
+
 
 def notify_failure(error_message, location="Unknown"):
     """Sends a failure notification to Telegram."""
@@ -113,6 +106,7 @@ def notify_failure(error_message, location="Unknown"):
     except Exception as e:
         print(f"Failed to send failure notification: {e}")
 
+
 def clean_name(name):
     """Removes special characters from a company name, keeps the rest the same."""
     try:
@@ -126,6 +120,7 @@ def clean_name(name):
         error_message = f"Failed to clean name: {str(e)}"
         notify_failure(error_message, "clean_name")
         return ""
+
 
 def get_company_list():
     """Loads and cleans the list of target companies from CSV."""
@@ -147,13 +142,6 @@ def get_company_list():
         notify_failure(error_message, "get_company_list")
         raise
 
-def kill_chrome_processes():
-    try:
-        subprocess.run(["pkill", "-f", "chrome"], stderr=subprocess.DEVNULL)
-        subprocess.run(["pkill", "-f", "chromedriver"], stderr=subprocess.DEVNULL)
-        time.sleep(2)  # Give OS time to release resources
-    except Exception as e:
-        print(f"Error killing processes: {e}")
 
 def is_company_in_list(company_name):
     """Checks if a company name is in the target list using improved matching."""
@@ -182,6 +170,7 @@ def is_company_in_list(company_name):
         notify_failure(error_message, "is_company_in_list")
         return False
 
+
 def remove_duplicates(jobs_list):
     """Removes duplicate job listings based on job URL."""
     try:
@@ -209,192 +198,11 @@ def remove_duplicates(jobs_list):
         notify_failure(error_message, "remove_duplicates")
         return jobs_list  # Return original list if deduplication fails
 
-# Setup Chrome with Stealth
-try:
-    options = Options()
-    options.add_argument("--start-maximized")
-    options.add_argument("--disable-blink-features=AutomationControlled")
-    options.add_argument("--disable-infobars")
-    options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("--no-sandbox")
-    options.add_argument("--lang=en-US")
-    options.add_experimental_option("excludeSwitches", ["enable-automation"])
-    options.add_experimental_option("useAutomationExtension", False)
-    options.add_argument(f"--user-data-dir={temp_dir}")
-    
-    # For GitHub Actions, we need to specify these additional options
-    options.add_argument("--disable-gpu")
-    options.add_argument("--window-size=1920,1080")
-
-    driver = webdriver.Chrome(service=webdriver.ChromeService(ChromeDriverManager().install()), options=options)
-
-    # Apply stealth settings
-    stealth(driver,
-        languages=["en-US", "en"],
-        vendor="Google Inc.",
-        webgl_vendor="Intel Inc.",
-        renderer="Intel Iris OpenGL Engine",
-        fix_hairline=True,
-    )
-except Exception as e:
-    error_message = f"Failed to setup Chrome driver: {str(e)}"
-    notify_failure(error_message, "Chrome setup")
-    raise
 
 # Helper function for human-like waiting
-def human_delay(min_seconds=1, max_seconds=3):
-    time.sleep(random.uniform(min_seconds, max_seconds))
+async def human_delay(min_seconds=1, max_seconds=3):
+    await asyncio.sleep(random.uniform(min_seconds, max_seconds))
 
-try:
-    # Initialize chat_id early
-    chat_id = get_chat_id(TOKEN)
-    
-    # Load company list before starting
-    get_company_list()
-    
-    URL = "https://www.linkedin.com/jobs/search/?currentJobId=4215342655&f_E=4&f_JT=F&f_SB2=42&f_TPR=r604800&f_WT=1%2C3&geoId=101165590&keywords=&location=United%20Kingdom&origin=JOB_SEARCH_PAGE_JOB_FILTER"
-    driver.get(URL)
-    human_delay(4, 7)
-
-    # Wait for page to fully load
-    try:
-        WebDriverWait(driver, 10).until(
-            EC.presence_of_element_located((By.CSS_SELECTOR, ".jobs-search__results-list"))
-        )
-        print("✅ Page loaded successfully")
-    except TimeoutException:
-        print("⚠️ Page took too long to load, but continuing anyway")
-
-
-except Exception as e:
-    error_message = f"Failed during initial setup and page loading: {str(e)}"
-    notify_failure(error_message, "Initial setup")
-    raise
-
-def close_linkedin_popup():
-    try:
-        # Try the specific dismiss button you provided
-        specific_dismiss_selectors = [
-            "button.modal__dismiss.contextual-sign-in-modal__modal-dismiss",
-            "button.modal__dismiss[aria-label='Dismiss']",
-            "button.contextual-sign-in-modal__modal-dismiss",
-            ".modal__dismiss.contextual-sign-in-modal__modal-dismiss",
-            "button[aria-label='Dismiss']"
-        ]
-        
-        for selector in specific_dismiss_selectors:
-            try:
-                dismiss_buttons = driver.find_elements(By.CSS_SELECTOR, selector)
-                for button in dismiss_buttons:
-                    if button.is_displayed():
-                        print(f"🎯 Found specific dismiss button: {selector}")
-                        # Try JavaScript click which is more reliable
-                        driver.execute_script("arguments[0].click();", button)
-                        print("✅ Closed LinkedIn sign-in popup")
-                        human_delay(1, 2)
-                        return True
-            except Exception as e:
-                continue
-        
-        # Use the XPath approach as backup
-        xpath_selectors = [
-            "//button[contains(@class, 'modal__dismiss')]",
-            "//button[@aria-label='Dismiss']",
-            "//button[contains(@class, 'contextual-sign-in-modal__modal-dismiss')]"
-        ]
-        
-        for xpath in xpath_selectors:
-            try:
-                elements = driver.find_elements(By.XPATH, xpath)
-                for element in elements:
-                    if element.is_displayed():
-                        driver.execute_script("arguments[0].click();", element)
-                        print(f"✅ Closed popup using XPath: {xpath}")
-                        human_delay(1, 2)
-                        return True
-            except:
-                continue
-                
-        # Last resort: try to use JavaScript to disable the modal directly
-        driver.execute_script("""
-            // Try to find and hide any modal or overlay
-            var modals = document.querySelectorAll('.modal, .modal__overlay, [role="dialog"], .artdeco-modal, .contextual-sign-in-modal');
-            modals.forEach(function(modal) {
-                if (modal && modal.style.display !== 'none') {
-                    modal.style.display = 'none';
-                    console.log('Hidden modal via JS');
-                }
-            });
-            
-            // Remove potential overlay backdrop
-            var backdrops = document.querySelectorAll('.modal__overlay, .artdeco-modal-overlay');
-            backdrops.forEach(function(backdrop) {
-                if (backdrop) {
-                    backdrop.remove();
-                    console.log('Removed backdrop via JS');
-                }
-            });
-            
-            // Remove body classes that might disable scrolling
-            document.body.classList.remove('overflow-hidden');
-        """)
-        print("🔧 Attempted JavaScript modal removal")
-        
-        return False
-    except Exception as e:
-        print(f"⚠️ Error handling LinkedIn popup: {e}")
-        return False
-
-# General function to close other popups
-def close_popups():
-    try:
-        # Try to close the LinkedIn signup modal first
-        signup_closed = close_linkedin_popup()
-        
-        # Handle other types of popups
-        popup_elements = [
-            '.artdeco-toasts_toasts',
-            '.artdeco-toast-item__dismiss',
-            '.msg-overlay-bubble-header__controls button',
-            '.consent-page button',
-            '//button[contains(text(), "Dismiss")]',
-            '//button[contains(text(), "Not now")]',
-            '//button[contains(text(), "No, thanks")]'
-        ]
-        
-        for selector in popup_elements:
-            try:
-                if selector.startswith('//'):
-                    elements = driver.find_elements(By.XPATH, selector)
-                else:
-                    elements = driver.find_elements(By.CSS_SELECTOR, selector)
-                
-                for element in elements:
-                    if element.is_displayed():
-                        driver.execute_script("arguments[0].click();", element)
-                        print(f"❌ Closed popup: {selector}")
-                        human_delay(0.5, 1)
-            except:
-                continue
-                
-        # Use JavaScript as fallback for toasts
-        driver.execute_script("""
-            var toasts = document.querySelector('.artdeco-toasts_toasts');
-            if (toasts) toasts.style.display='none';
-            
-            var overlays = document.querySelectorAll('.artdeco-modal');
-            overlays.forEach(function(overlay) {
-                if (overlay.style.display !== 'none') overlay.style.display='none';
-            });
-        """)
-    except Exception as e:
-        error_message = f"Error handling popups: {str(e)}"
-        print(error_message)
-        notify_failure(error_message, "close_popups")
-
-import json
-from bs4 import BeautifulSoup
-import html
 
 def extract_job_description(html_content):
     soup = BeautifulSoup(html_content, "html.parser")
@@ -406,11 +214,11 @@ def extract_job_description(html_content):
     try:
         job_json = json.loads(script_tag.string)
         raw_description = job_json.get("description", "")
-        # Convert HTML entities (e.g., &lt;p&gt;) to actual characters
         decoded_description = html.unescape(raw_description)
-        return decoded_description.strip()
+        return decoded_description
     except json.JSONDecodeError:
         return None
+
 
 async def parse_url(url):
     client = Client(impersonate=Impersonate.Firefox136)
@@ -434,14 +242,13 @@ async def parse_url(url):
     return external_url, description
 
 
-def get_external_url(url):
+async def get_external_url(url):
     try:
-        return asyncio.run(parse_url(url))
-    except RuntimeError:
-        # If event loop already running
-        loop = asyncio.get_event_loop()
-        task = loop.create_task(parse_url(url))
-        return loop.run_until_complete(task)
+        time.sleep(random.randint(1, 5))
+        return await parse_url(url)
+    except Exception as e:
+        print(f"Error getting external URL: {e}")
+        return url, None
 
 
 def extract_job_details(html):
@@ -487,9 +294,8 @@ def extract_job_details(html):
             logo_tag = job.select_one(".artdeco-entity-image")
             job_data['logo_url'] = logo_tag.get('src') if logo_tag else None
 
-            external_url, description  = get_external_url(url)
-            job_data['job_url'] = external_url
-            job_data['description'] = description
+            job_data['job_url'] = url
+            job_data['description'] = None
             job_listings.append(job_data)
 
         print(f"📊 Extraction stats: {matching_jobs}/{total_jobs} jobs matched target companies")
@@ -499,24 +305,26 @@ def extract_job_details(html):
         notify_failure(error_message, "extract_job_details")
         return []
 
-def check_page_content_updated(previous_job_count):
-    """Check if page content has been updated after clicking 'See more'."""
-    try:
-        # Count current visible job cards
-        current_job_cards = driver.find_elements(By.CSS_SELECTOR, 
-            ".job-card-container--clickable, .jobs-search__results-list li")
-        current_count = len(current_job_cards)
+
+async def process_job_urls(job_listings):
+    """Process all job URLs to get external URLs and descriptions asynchronously"""
+    tasks = []
+    for job in job_listings:
+        if job.get('job_url'):
+            tasks.append(get_external_url(job['job_url']))
+    
+    # Process all URLs concurrently for better performance
+    if tasks:
+        results = await asyncio.gather(*tasks)
         
-        # Check if we have more jobs than before
-        if current_count > previous_job_count:
-            print(f"✅ Page updated: {previous_job_count} → {current_count} jobs")
-            return True, current_count
-        else:
-            print(f"❌ Page did not update: Still showing {current_count} jobs")
-            return False, current_count
-    except Exception as e:
-        print(f"⚠️ Error checking page content: {e}")
-        return False, previous_job_count
+        # Update job listings with results
+        for i, (external_url, description) in enumerate(results):
+            if i < len(job_listings):
+                job_listings[i]['job_url'] = external_url.replace('"', '')
+                job_listings[i]['description'] = description
+    
+    return job_listings
+
 
 def insert_jobs_to_db(job_listings):
     """Delete all jobs with data_source='linkedin' and insert new jobs"""
@@ -538,16 +346,13 @@ def insert_jobs_to_db(job_listings):
             logger.info(f"Inserting {len(job_listings)} new jobs...")
             for job in job_listings:
                 try:
-                    # Skip jobs with certain keywords in salary if needed
-                    salary = job.get('salary', '')
-                    
                     # Create new job object
                     new_job = Job(
                         job_title=job.get('title', ''),
                         company_name=job.get('company', ''),
                         company_logo=job.get('logo_url', ''),
                         salary=job.get('salary', '') if job.get('salary') else None,
-                        posted_date=job.get('posted_date', ''),
+                        posted_date=job.get('posted_time', ''),
                         experience='Full-time',  # Default or extract from job data if available
                         location=job.get('location', '') if job.get('location') else None,
                         apply_link=job.get('job_url', ''),
@@ -577,160 +382,341 @@ def insert_jobs_to_db(job_listings):
         notify_failure(error_message, "insert_jobs_to_db")
     
     return inserted_count
-	
-def load_all_jobs():
+
+
+async def close_linkedin_popup(page):
+    """Close LinkedIn sign-in popups using Playwright"""
+    try:
+        # List of potential selectors for dismiss buttons
+        dismiss_selectors = [
+            "button.modal__dismiss.contextual-sign-in-modal__modal-dismiss",
+            "button.modal__dismiss[aria-label='Dismiss']",
+            "button.contextual-sign-in-modal__modal-dismiss",
+            ".modal__dismiss.contextual-sign-in-modal__modal-dismiss",
+            "button[aria-label='Dismiss']"
+        ]
+        
+        for selector in dismiss_selectors:
+            try:
+                # Check if the button exists and is visible
+                button = await page.query_selector(selector)
+                if button:
+                    is_visible = await button.is_visible()
+                    if is_visible:
+                        print(f"🎯 Found specific dismiss button: {selector}")
+                        await button.click()
+                        print("✅ Closed LinkedIn sign-in popup")
+                        await human_delay(1, 2)
+                        return True
+            except Exception:
+                continue
+        
+        # If no button found with CSS selectors, try with JavaScript
+        await page.evaluate("""
+            // Try to find and hide any modal or overlay
+            var modals = document.querySelectorAll('.modal, .modal__overlay, [role="dialog"], .artdeco-modal, .contextual-sign-in-modal');
+            modals.forEach(function(modal) {
+                if (modal && modal.style.display !== 'none') {
+                    modal.style.display = 'none';
+                    console.log('Hidden modal via JS');
+                }
+            });
+            
+            // Remove potential overlay backdrop
+            var backdrops = document.querySelectorAll('.modal__overlay, .artdeco-modal-overlay');
+            backdrops.forEach(function(backdrop) {
+                if (backdrop) {
+                    backdrop.remove();
+                    console.log('Removed backdrop via JS');
+                }
+            });
+            
+            // Remove body classes that might disable scrolling
+            document.body.classList.remove('overflow-hidden');
+        """)
+        print("🔧 Attempted JavaScript modal removal")
+        
+        return False
+    except Exception as e:
+        print(f"⚠️ Error handling LinkedIn popup: {e}")
+        return False
+
+
+async def close_popups(page):
+    """Close various popups that might appear on LinkedIn"""
+    try:
+        # First try to close the LinkedIn signup modal
+        await close_linkedin_popup(page)
+        
+        # Handle other types of popups
+        popup_selectors = [
+            '.artdeco-toasts_toasts',
+            '.artdeco-toast-item__dismiss',
+            '.msg-overlay-bubble-header__controls button',
+            '.consent-page button',
+            'button:has-text("Dismiss")',
+            'button:has-text("Not now")',
+            'button:has-text("No, thanks")'
+        ]
+        
+        for selector in popup_selectors:
+            try:
+                elements = await page.query_selector_all(selector)
+                for element in elements:
+                    if await element.is_visible():
+                        await element.click()
+                        print(f"❌ Closed popup: {selector}")
+                        await human_delay(0.5, 1)
+            except Exception:
+                continue
+                
+        # Use JavaScript as fallback for toasts
+        await page.evaluate("""
+            var toasts = document.querySelector('.artdeco-toasts_toasts');
+            if (toasts) toasts.style.display='none';
+            
+            var overlays = document.querySelectorAll('.artdeco-modal');
+            overlays.forEach(function(overlay) {
+                if (overlay.style.display !== 'none') overlay.style.display='none';
+            });
+        """)
+    except Exception as e:
+        error_message = f"Error handling popups: {str(e)}"
+        print(error_message)
+        notify_failure(error_message, "close_popups")
+
+
+async def check_page_content_updated(page, previous_job_count):
+    """Check if page content has been updated after clicking 'See more'."""
+    try:
+        # Count current visible job cards
+        current_job_cards = await page.query_selector_all(
+            ".job-card-container--clickable, .jobs-search__results-list li")
+        current_count = len(current_job_cards)
+        
+        # Check if we have more jobs than before
+        if current_count > previous_job_count:
+            print(f"✅ Page updated: {previous_job_count} → {current_count} jobs")
+            return True, current_count
+        else:
+            print(f"❌ Page did not update: Still showing {current_count} jobs")
+            return False, current_count
+    except Exception as e:
+        print(f"⚠️ Error checking page content: {e}")
+        return False, previous_job_count
+
+
+async def load_all_jobs():
     global chat_id  # Declare chat_id as global within this function
     
-    try:
-        jobs_found = 0
-        consecutive_no_button_found = 0
-        consecutive_page_not_updated = 0
-        max_no_button_attempts = 3
-        max_no_update_attempts = 2
+    async with async_playwright() as p:
+        # Launch browser with stealth mode
+        browser = await p.chromium.launch(
+            headless=False,  # Set to True for production
+        )
         
-        total_jobs = []
-        processed_page_count = 0
-
-        while True:
-            close_popups()
+        # Create a browser context with specific options to avoid detection
+        context = await browser.new_context(
+            viewport={'width': 1920, 'height': 1080},
+            user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
+            locale='en-US',
+            timezone_id='Europe/London',
+        )
+        
+        # Apply evasion script to avoid detection
+        await context.add_init_script("""
+            // Overwrite the navigator properties
+            Object.defineProperty(navigator, 'webdriver', {
+                get: () => false
+            });
+            // If needed, override more properties here
+        """)
+        
+        page = await context.new_page()
+        
+        try:
+            jobs_found = 0
+            consecutive_no_button_found = 0
+            consecutive_page_not_updated = 0
+            max_no_button_attempts = 3
+            max_no_update_attempts = 2
             
-            # Scroll smoothly in chunks for more human-like behavior
-            scroll_height = driver.execute_script("return document.body.scrollHeight")
-            current_position = driver.execute_script("return window.pageYOffset")
-            step = random.randint(300, 700)
+            total_jobs = []
+            processed_page_count = 0
             
-            while current_position < scroll_height:
-                driver.execute_script(f"window.scrollTo(0, {current_position + step});")
-                current_position += step
-                human_delay(0.3, 0.7)
+            # LinkedIn jobs search URL
+            URL = "https://www.linkedin.com/jobs/search/?currentJobId=4215342655&f_E=4&f_JT=F&f_SB2=42&f_TPR=r604800&f_WT=1%2C3&geoId=101165590&keywords=&location=United%20Kingdom&origin=JOB_SEARCH_PAGE_JOB_FILTER"
             
-            # Count visible job cards to track progress
-            job_cards = driver.find_elements(By.CSS_SELECTOR, 
-                ".job-card-container--clickable, .jobs-search__results-list li")
-            current_job_count = len(job_cards)
+            # Navigate to the page
+            await page.goto(URL)
+            await human_delay(4, 7)
             
-            page_source = driver.page_source
-            jobs = extract_job_details(page_source)
-            
-            # Add new jobs to our list
-            total_jobs.extend(jobs)
-            processed_page_count += 1
-            
-            # Every few pages, deduplicate and save results
-            if processed_page_count % 3 == 0:
-                # Remove duplicates before saving
-                total_jobs = remove_duplicates(total_jobs)
-                
-                with open("linkedin_filtered_jobs.json", "w", encoding="utf-8") as json_file:
-                    json.dump(total_jobs, json_file, indent=2, ensure_ascii=False)
-                print(f"💾 Saved {len(total_jobs)} unique jobs to JSON (after {processed_page_count} pages)")
-
-            # Print progress only if we found more jobs
-            if current_job_count > jobs_found:
-                print(f"📊 Found {current_job_count} total jobs, {len(total_jobs)} matching companies")
-                jobs_found = current_job_count
-            
-            # Try to find and click "See more" button
-            button_found = False
-            
+            # Wait for job results to load
             try:
-                # Try different approaches to find the "See more" button
-                see_more_selectors = [
-                    "//button[contains(@class, 'infinite-scroller__show-more')]",
-                    "//button[contains(text(), 'See more')]",
-                    "//button[contains(text(), 'Show more')]",
-                    ".infinite-scroller__show-more-button",
-                    ".more-jobs-button"
-                ]
+                await page.wait_for_selector(".jobs-search__results-list", timeout=10000)
+                print("✅ Page loaded successfully")
+            except PlaywrightTimeoutError:
+                print("⚠️ Page took too long to load, but continuing anyway")
+            
+            # Close any initial popups
+            await close_popups(page)
+            
+            while True:
+                await close_popups(page)
                 
-                see_more_button = None
-                for selector in see_more_selectors:
-                    elements = []
-                    try:
-                        if selector.startswith("//"):
-                            elements = driver.find_elements(By.XPATH, selector)
-                        else:
-                            elements = driver.find_elements(By.CSS_SELECTOR, selector)
-                        
-                        if elements and len(elements) > 0 and elements[0].is_displayed():
-                            see_more_button = elements[0]
+                # Scroll smoothly for more human-like behavior
+                scroll_height = await page.evaluate("document.body.scrollHeight")
+                for i in range(0, scroll_height, random.randint(300, 700)):
+                    await page.evaluate(f"window.scrollTo(0, {i})")
+                    await human_delay(0.1, 0.3)
+                
+                # Count visible job cards to track progress
+                job_cards = await page.query_selector_all(
+                    ".job-card-container--clickable, .jobs-search__results-list li")
+                current_job_count = len(job_cards)
+                
+                # Get page content and extract jobs
+                page_content = await page.content()
+                jobs = extract_job_details(page_content)
+                
+                # Process the job URLs to get external URLs and descriptions
+                jobs = await process_job_urls(jobs)
+                
+                # Add new jobs to our list
+                total_jobs.extend(jobs)
+
+                processed_page_count += 1
+                
+                # Every few pages, deduplicate and save results
+                if processed_page_count % 3 == 0:
+                    # Remove duplicates before saving
+                    total_jobs = remove_duplicates(total_jobs)
+                    
+                    with open("linkedin_filtered_jobs.json", "w", encoding="utf-8") as json_file:
+                        json.dump(total_jobs, json_file, indent=2, ensure_ascii=False)
+                    print(f"💾 Saved {len(total_jobs)} unique jobs to JSON (after {processed_page_count} pages)")
+                
+                # Print progress only if we found more jobs
+                if current_job_count > jobs_found:
+                    print(f"📊 Found {current_job_count} total jobs, {len(total_jobs)} matching companies")
+                    jobs_found = current_job_count
+                
+                # Try to find and click "See more" button
+                button_found = False
+                
+                try:
+                    # Try different approaches to find the "See more" button
+                    see_more_selectors = [
+                        "button.infinite-scroller__show-more",
+                        "button:has-text('See more')",
+                        "button:has-text('Show more')",
+                        ".infinite-scroller__show-more-button",
+                        ".more-jobs-button"
+                    ]
+                    
+                    see_more_button = None
+                    for selector in see_more_selectors:
+                        button = await page.query_selector(selector)
+                        if button and await button.is_visible():
+                            see_more_button = button
                             button_found = True
                             break
-                    except:
-                        continue
-                
-                if see_more_button:
-                    # Make sure the button is in view and wait for it to be clickable
-                    driver.execute_script("arguments[0].scrollIntoView({block: 'center', behavior: 'smooth'});", see_more_button)
-                    human_delay(1, 2)
                     
-                    # Remember job count before clicking
-                    pre_click_job_count = current_job_count
-                    
-                    # Try JavaScript click which is more reliable
-                    driver.execute_script("arguments[0].click();", see_more_button)
-                    print("🔄 Loading more jobs...")
-                    human_delay(3, 5)  # Give more time to load
-                    
-                    # Check if the page has actually been updated with new content
-                    page_updated, new_job_count = check_page_content_updated(pre_click_job_count)
-                    
-                    if page_updated:
-                        consecutive_no_button_found = 0  # Reset button counter on success
-                        consecutive_page_not_updated = 0  # Reset update counter on success
-                    else:
-                        consecutive_page_not_updated += 1
-                        print(f"⚠️ Page didn't update after clicking 'See more' ({consecutive_page_not_updated}/{max_no_update_attempts})")
+                    if see_more_button:
+                        # Make sure the button is in view
+                        await see_more_button.scroll_into_view_if_needed()
+                        await human_delay(1, 2)
                         
-                        # If we've had too many consecutive non-updates, assume we're done
-                        if consecutive_page_not_updated >= max_no_update_attempts:
-                            print("⛔ Too many failed page updates. Breaking loop.")
-                            break
-                else:
+                        # Remember job count before clicking
+                        pre_click_job_count = current_job_count
+                        
+                        # Click the button
+                        await see_more_button.click()
+                        print("🔄 Loading more jobs...")
+                        await human_delay(3, 5)  # Give more time to load
+                        
+                        # Check if the page has actually been updated with new content
+                        page_updated, new_job_count = await check_page_content_updated(page, pre_click_job_count)
+                        
+                        if page_updated:
+                            consecutive_no_button_found = 0  # Reset button counter on success
+                            consecutive_page_not_updated = 0  # Reset update counter on success
+                        else:
+                            consecutive_page_not_updated += 1
+                            print(f"⚠️ Page didn't update after clicking 'See more' ({consecutive_page_not_updated}/{max_no_update_attempts})")
+                            
+                            # If we've had too many consecutive non-updates, assume we're done
+                            if consecutive_page_not_updated >= max_no_update_attempts:
+                                print("⛔ Too many failed page updates. Breaking loop.")
+                                break
+                    else:
+                        consecutive_no_button_found += 1
+                        print(f"⚠️ No 'See more' button found (attempt {consecutive_no_button_found}/{max_no_button_attempts})")
+                        await human_delay(2, 3)  # Wait a bit and try again with a fresh scroll
+                        
+                except Exception as e:
+                    print(f"⚠️ Click attempt failed: {e}")
                     consecutive_no_button_found += 1
-                    print(f"⚠️ No 'See more' button found (attempt {consecutive_no_button_found}/{max_no_button_attempts})")
-                    human_delay(2, 3)  # Wait a bit and try again with a fresh scroll
-                    
-            except (ElementClickInterceptedException, StaleElementReferenceException) as e:
-                print(f"⚠️ Click attempt failed: {e}")
-                consecutive_no_button_found += 1
-                human_delay(1, 2)
-
-            except Exception as e:
-                print(f"⚠️ Error during loading: {e}")
-                consecutive_no_button_found += 1
-                human_delay(1, 2)
+                    await human_delay(1, 2)
+                
+                # If we haven't found the button for several consecutive attempts, assume we've reached the end
+                if consecutive_no_button_found >= max_no_button_attempts:
+                    print(f"✅ No more 'See more' buttons found after {max_no_button_attempts} attempts. Done loading jobs.")
+                    break
             
-            # If we haven't found the button for several consecutive attempts, assume we've reached the end
-            if consecutive_no_button_found >= max_no_button_attempts:
-                print(f"✅ No more 'See more' buttons found after {max_no_button_attempts} attempts. Done loading jobs.")
-                break
-        
-        # Final job count
-        final_count = len(driver.find_elements(By.CSS_SELECTOR, 
-            ".job-card-container--clickable, .jobs-search__results-list li"))
-        
-        # Final deduplication
-        total_jobs = remove_duplicates(total_jobs)
+            # Final job count
+            final_count = len(await page.query_selector_all(
+                ".job-card-container--clickable, .jobs-search__results-list li"))
+            
+            # Final deduplication
+            total_jobs = remove_duplicates(total_jobs)
+            
+            # Save to database
+            insert_jobs_to_db(total_jobs)
+            
+            print(f"🏁 Total jobs loaded: {final_count}")
+            print(f"🏁 Filtered jobs (matching companies): {len(total_jobs)}")
+            
+            # Send success notification
+            if chat_id is None:
+                chat_id = get_chat_id(TOKEN)
+            if chat_id:
+                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                message = f"✅ LINKEDIN SCRAPER SUCCESS at {timestamp}\nTotal jobs loaded: {final_count}\nMatching companies: {len(total_jobs)}"
+                send_message(TOKEN, message, chat_id)
+            
+            return len(total_jobs)
+            
+        except Exception as e:
+            error_message = f"Error in load_all_jobs: {str(e)}"
+            notify_failure(error_message, "load_all_jobs")
+            return 0
+        finally:
+            # Always close the browser
+            await browser.close()
+            print("Browser closed")
 
-        insert_jobs_to_db(total_jobs)
-        
-        print(f"🏁 Total jobs loaded: {final_count}")
-        print(f"🏁 Filtered jobs (matching companies): {len(total_jobs)}")
 
-        # Send success notification
+# Entry point of the script
+async def main():
+    try:
+        # Initialize chat_id early to avoid scope issues
+        global chat_id
         if chat_id is None:
             chat_id = get_chat_id(TOKEN)
-        if chat_id:
-            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            message = f"✅ LINKEDIN SCRAPER SUCCESS at {timestamp}\nTotal jobs loaded: {final_count}\nMatching companies: {len(total_jobs)}"
-            send_message(TOKEN, message, chat_id)
 
-        return len(total_jobs)
+        # Setup database
+        setup_database()
+        
+        # Load companies list
+        get_company_list()
+        
+        # Start the scraping process
+        await load_all_jobs()
     except Exception as e:
-        error_message = f"Error in load_all_jobs: {str(e)}"
-        notify_failure(error_message, "load_all_jobs")
-        return 0
+        error_message = f"Critical failure in main execution: {str(e)}"
+        notify_failure(error_message, "main_execution")
+
 
 # Optional - Function to deduplicate an existing JSON file
 def deduplicate_existing_json(filepath="linkedin_filtered_jobs.json"):
@@ -762,21 +748,6 @@ def deduplicate_existing_json(filepath="linkedin_filtered_jobs.json"):
         notify_failure(error_message, "deduplicate_existing_json")
         return 0
 
-try:
-    # Initialize chat_id early to avoid scope issues
-    if chat_id is None:
-        chat_id = get_chat_id(TOKEN)
 
-    setup_database()
-    
-    load_all_jobs()
-except Exception as e:
-    error_message = f"Critical failure in main execution: {str(e)}"
-    notify_failure(error_message, "main_execution")
-finally:
-    # Always close the driver
-    try:
-        driver.quit()
-        print("Browser closed")
-    except:
-        pass
+if __name__ == "__main__":
+    asyncio.run(main())

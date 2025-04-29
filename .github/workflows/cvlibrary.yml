@@ -1,4 +1,4 @@
-name: WorkFlow for NHS script
+name: WorkFlow for CV Library script
 
 on:
   push:            # <--- add this line to trigger on any push
