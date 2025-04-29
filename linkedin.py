@@ -511,7 +511,7 @@ async def load_all_jobs():
     async with async_playwright() as p:
         # Launch browser with stealth mode
         browser = await p.chromium.launch(
-            headless=False,  # Set to True for production
+            headless=True,  # Set to True for production
         )
         
         # Create a browser context with specific options to avoid detection
@@ -711,7 +711,7 @@ async def main():
         get_company_list()
         
         # Start the scraping process
-        await load_all_jobs()
+        load_all_jobs()
     except Exception as e:
         error_message = f"Critical failure in main execution: {str(e)}"
         notify_failure(error_message, "main_execution")
