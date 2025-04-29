@@ -711,7 +711,7 @@ async def main():
         get_company_list()
         
         # Start the scraping process
-        load_all_jobs()
+        await load_all_jobs()
     except Exception as e:
         error_message = f"Critical failure in main execution: {str(e)}"
         notify_failure(error_message, "main_execution")
