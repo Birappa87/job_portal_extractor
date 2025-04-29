@@ -408,7 +408,6 @@ async def parse_url(url):
         external_url = soup.find('code', id='applyUrl')
         if external_url:
             external_url = external_url.string
-            external_url = external_url.split("url=")[-1]
         else:
             external_url = url
     except:
@@ -474,9 +473,6 @@ def extract_job_details(html):
             job_data['job_url'] = external_url
             job_data['description'] = description
             job_listings.append(job_data)
-
-            if total_jobs == 5:
-                break
 
         print(f"📊 Extraction stats: {matching_jobs}/{total_jobs} jobs matched target companies")
         return job_listings
@@ -703,10 +699,6 @@ def load_all_jobs():
         
         print(f"🏁 Total jobs loaded: {final_count}")
         print(f"🏁 Filtered jobs (matching companies): {len(total_jobs)}")
-
-        # Final save to JSON
-        with open("linkedin_filtered_jobs.json", "w", encoding="utf-8") as json_file:
-            json.dump(total_jobs, json_file, indent=2, ensure_ascii=False)
 
         # Send success notification
         if chat_id is None:
