@@ -25,4 +25,4 @@ jobs:
           python -m playwright install
           
       - name: execute py script
-        run: python cvlibrary.py
+        run: python cvLibrary.py
