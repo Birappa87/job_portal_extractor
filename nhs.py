@@ -147,18 +147,6 @@ def get_company_list():
         notify_failure(error_message, "get_company_list")
         raise
 
-def is_matching_company(employer):
-    """Checks if the employer matches any company in our target list."""
-    try:
-        clean_employer = clean_name(employer)
-        if clean_employer in company_list:
-            return True
-        return False
-    except Exception as e:
-        error_message = f"Failed to check company match: {str(e)}"
-        notify_failure(error_message, "is_matching_company")
-        return False
-
 def parse_date(date_str):
     """Parse date string in various formats to a datetime.date object"""
     try:
