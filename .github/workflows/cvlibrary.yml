@@ -24,4 +24,4 @@ jobs:
           pip install -r requirements.txt
           pip install rapidfuzz
       - name: execute py script
-        run: python simplyHired.py
+        run: python simplyhired.py
