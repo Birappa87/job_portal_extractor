@@ -192,7 +192,7 @@ def extract_jobs(job_list):
             salary = job.get("salaryInfo", "")
 
             match, score, _ = process.extractOne(company_name, company_list)
-            if score > 80 and (salary.lower() not in ['hour', 'day', 'hourly']):
+            if score > 80 and not any(unit in salary.lower() for unit in ['hour', 'day', 'hourly']):
                 extracted.append({
                     "job_title": job.get("title", ""),
                     "company_name": company_name,
@@ -267,7 +267,7 @@ def scrape_simplyhired():
     }
 
     params_base = {
-        'l': 'united kingdom',
+        'l': 'United Kingdom',
         'mip': '30000',
     }
 
