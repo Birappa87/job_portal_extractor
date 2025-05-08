@@ -17,6 +17,8 @@ from playwright.async_api import async_playwright, TimeoutError as PlaywrightTim
 from sqlalchemy import create_engine, Column, Integer, String, Text, Date
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
+from rapidfuzz import process
+
 
 TOKEN = '7844666863:AAF0fTu1EqWC1v55oC25TVzSjClSuxkO2X4'
 chat_id = None
@@ -272,30 +274,32 @@ def extract_job_details(html):
             
             # Print for debugging
             clean_company_name = clean_name(company_name)
-            company_match = is_company_in_list(company_name)
+
+            try:
+                match, score, _ = process.extractOne(company_name, company_list)
+            except Exception as e:
+                print(f"Error in fuzzy matching: {e}")
+                match, score = company_name, 0
             
-            # Skip jobs from companies not in our target list
-            if not company_match:
-                continue
-                
-            matching_jobs += 1
+            if (not company_list or score > 70) and (not salary or str(salary).lower() not in ['hour', 'day', 'hourly']):
+                matching_jobs += 1
 
-            location_tag = job.select_one('span.job-search-card__location')
-            job_data['location'] = location_tag.get_text(strip=True) if location_tag else None
+                location_tag = job.select_one('span.job-search-card__location')
+                job_data['location'] = location_tag.get_text(strip=True) if location_tag else None
 
-            time_tag = job.select_one('time')
-            job_data['posted_time'] = time_tag.get_text(strip=True) if time_tag else None
-            job_data['posted_datetime'] = time_tag.get('datetime') if time_tag else None
+                time_tag = job.select_one('time')
+                job_data['posted_time'] = time_tag.get_text(strip=True) if time_tag else None
+                job_data['posted_datetime'] = time_tag.get('datetime') if time_tag else None
 
-            link_tag = job.select_one('a.base-card__full-link')
-            url = link_tag.get('href') if link_tag else None
+                link_tag = job.select_one('a.base-card__full-link')
+                url = link_tag.get('href') if link_tag else None
 
-            logo_tag = job.select_one(".artdeco-entity-image")
-            job_data['logo_url'] = logo_tag.get('src') if logo_tag else None
+                logo_tag = job.select_one(".artdeco-entity-image")
+                job_data['logo_url'] = logo_tag.get('src') if logo_tag else None
 
-            job_data['job_url'] = url
-            job_data['description'] = None
-            job_listings.append(job_data)
+                job_data['job_url'] = url
+                job_data['description'] = None
+                job_listings.append(job_data)
 
         print(f"📊 Extraction stats: {matching_jobs}/{total_jobs} jobs matched target companies")
         return job_listings
