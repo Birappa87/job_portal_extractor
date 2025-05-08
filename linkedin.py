@@ -281,6 +281,9 @@ def extract_job_details(html):
                 print(f"Error in fuzzy matching: {e}")
                 match, score = company_name, 0
             
+            salary_tag = job.select_one('ul.job-card-container__metadata-wrapper span[dir="ltr"]')
+            salary = salary_tag.get_text(strip=True) if salary_tag else None
+
             if (not company_list or score > 70) and (not salary or str(salary).lower() not in ['hour', 'day', 'hourly']):
                 matching_jobs += 1
 
@@ -297,9 +300,11 @@ def extract_job_details(html):
                 logo_tag = job.select_one(".artdeco-entity-image")
                 job_data['logo_url'] = logo_tag.get('src') if logo_tag else None
 
+                job_data['salary'] = salary
                 job_data['job_url'] = url
                 job_data['description'] = None
                 job_listings.append(job_data)
+
 
         print(f"📊 Extraction stats: {matching_jobs}/{total_jobs} jobs matched target companies")
         return job_listings
