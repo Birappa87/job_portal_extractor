@@ -123,7 +123,7 @@ def get_company_list():
     """Loads and cleans the list of target companies from CSV."""
     global company_list
     try:
-        df = pd.read_csv(r"C:\\Users\\birap\\Downloads\\2025-04-04_-_Worker_and_Temporary_Worker.csv")
+        df = pd.read_csv(r"data/2025-04-04_-_Worker_and_Temporary_Worker.csv")
         df['Organisation Name'] = df['Organisation Name'].apply(clean_name)
         company_list = list(df['Organisation Name'])
         print(f"Loaded {len(company_list)} companies from CSV")
