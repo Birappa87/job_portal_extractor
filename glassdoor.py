@@ -7,6 +7,7 @@ from datetime import datetime
 from sqlalchemy import create_engine, Column, Integer, String, Text, inspect
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
+from rapidfuzz import process
 
 Base = declarative_base()
 
@@ -189,85 +190,90 @@ def delete_jobs_by_source(source="Glassdoor"):
     finally:
         session.close()
 
-def extract_external_url(cookies, headers, queryString):
-    """Extract external URL from Glassdoor."""
-    try:
-        json_data = [
-            {
-                'operationName': 'SerpRedirectorQuery',
-                'variables': {
-                    'baseUrl': 'www.glassdoor.co.uk',
-                    'queryString': f'{queryString}',
-                },
-                'query': 'mutation SerpRedirectorQuery($applyData: ApplyDataInput, $baseUrl: String!, $queryString: String!) {\n  redirector(\n    redirectorContextInput: {applyData: $applyData, baseUrl: $baseUrl, queryString: $queryString}\n  ) {\n    redirectUrl\n    __typename\n  }\n}\n',
-            },
-        ]
+# def extract_external_url(cookies, headers, queryString):
+#     """Extract external URL from Glassdoor."""
+#     try:
+#         json_data = [
+#             {
+#                 'operationName': 'SerpRedirectorQuery',
+#                 'variables': {
+#                     'baseUrl': 'www.glassdoor.co.uk',
+#                     'queryString': f'{queryString}',
+#                 },
+#                 'query': 'mutation SerpRedirectorQuery($applyData: ApplyDataInput, $baseUrl: String!, $queryString: String!) {\n  redirector(\n    redirectorContextInput: {applyData: $applyData, baseUrl: $baseUrl, queryString: $queryString}\n  ) {\n    redirectUrl\n    __typename\n  }\n}\n',
+#             },
+#         ]
 
-        response = requests.post('https://www.glassdoor.co.uk/graph', cookies=cookies, headers=headers, json=json_data)
+#         response = requests.post('https://www.glassdoor.co.uk/graph', cookies=cookies, headers=headers, json=json_data)
 
-        result = response.json()
-        if response.status_code == 200:
-            url = result[0]['data']['redirector']['redirectUrl']
-        else:
-            url = None
+#         result = response.json()
+#         url = None
+#         if response.status_code == 200:
+#             url = result[0]['data']['redirector']['redirectUrl']
+#         else:
+#             url = None
         
-        return url
-    except Exception as e:
-        error_message = f"Failed to extract external URL: {str(e)}"
-        print(error_message)
-        notify_failure(error_message, "extract_external_url")
-        return None
+#         return url
 
-def extract_description(cookies, headers, jobSearchTrackingKey, jl, queryString):
-    """Extract job description from Glassdoor."""
-    try:
-        json_data = [
-        {
-            'operationName': 'uilTrackingMutation',
-            'variables': {
-                'events': [
-                    {
-                        'eventType': 'JAVASCRIPT_DETECTION',
-                        'jobSearchTrackingKey': jobSearchTrackingKey,
-                        'pageType': 'SERP',
-                    },
-                ],
-            },
-            'query': 'mutation uilTrackingMutation($events: [EventContextInput]!) {\n  trackEvents(events: $events) {\n    eventType\n    resultStatus\n    message\n    clickId\n    clickGuid\n    __typename\n  }\n}\n',
-        },
-        {
-            'operationName': 'JobDetailQuery',
-            'variables': {
-                'enableReviewSummary': True,
-                'jl': jl,
-                'queryString': queryString,
-                'pageTypeEnum': 'SERP',
-                'countryId': 2,
-            },
-            'query': 'query JobDetailQuery($jl: Long!, $queryString: String, $enableReviewSummary: Boolean!, $pageTypeEnum: PageTypeEnum, $countryId: Int) {\n  jobview: jobView(\n    listingId: $jl\n    contextHolder: {queryString: $queryString, pageTypeEnum: $pageTypeEnum}\n  ) {\n    ...JobDetailsFragment\n    employerReviewSummary @include(if: $enableReviewSummary) {\n      reviewSummary {\n        highlightSummary {\n          sentiment\n          sentence\n          categoryReviewCount\n          __typename\n        }\n        __typename\n      }\n      __typename\n    }\n    __typename\n  }\n}\n\nfragment JobDetailsFragment on JobView {\n  employerBenefits {\n    benefitsOverview {\n      benefitsHighlights {\n        benefit {\n          commentCount\n          icon\n          name\n          __typename\n        }\n        highlightPhrase\n        __typename\n      }\n      overallBenefitRating\n      employerBenefitSummary {\n        comment\n        __typename\n      }\n      __typename\n    }\n    benefitReviews {\n      benefitComments {\n        id\n        comment\n        __typename\n      }\n      cityName\n      createDate\n      currentJob\n      rating\n      stateName\n      userEnteredJobTitle\n      __typename\n    }\n    numReviews\n    __typename\n  }\n  employerContent {\n    managedContent {\n      id\n      type\n      title\n      body\n      captions\n      photos\n      videos\n      __typename\n    }\n    __typename\n  }\n  employerAttributes {\n    attributes {\n      attributeName\n      attributeValue\n      __typename\n    }\n    __typename\n  }\n  gaTrackerData {\n    jobViewDisplayTimeMillis\n    requiresTracking\n    pageRequestGuid\n    searchTypeCode\n    trackingUrl\n    __typename\n  }\n  header {\n    jobLink\n    adOrderId\n    ageInDays\n    applicationId\n    appliedDate\n    applyUrl\n    applyButtonDisabled\n    categoryMgocId\n    campaignKeys\n    easyApply\n    employerNameFromSearch\n    employer {\n      activeStatus\n      bestProfile {\n        id\n        __typename\n      }\n      id\n      name\n      shortName\n      size\n      squareLogoUrl\n      __typename\n    }\n    expired\n    goc\n    gocId\n    hideCEOInfo\n    indeedJobAttribute {\n      education\n      skills\n      educationLabel\n      skillsLabel\n      yearsOfExperienceLabel\n      __typename\n    }\n    isIndexableJobViewPage\n    isSponsoredJob\n    isSponsoredEmployer\n    jobTitleText\n    jobType\n    jobTypeKeys\n    jobCountryId\n    jobResultTrackingKey\n    locId\n    locationName\n    locationType\n    normalizedJobTitle\n    payCurrency\n    payPeriod\n    payPeriodAdjustedPay {\n      p10\n      p50\n      p90\n      __typename\n    }\n    profileAttributes {\n      suid\n      label\n      match\n      type\n      __typename\n    }\n    rating\n    remoteWorkTypes\n    salarySource\n    savedJobId\n    seoJobLink\n    serpUrlForJobListing\n    sgocId\n    __typename\n  }\n  job {\n    description\n    discoverDate\n    eolHashCode\n    importConfigId\n    jobTitleId\n    jobTitleText\n    listingId\n    __typename\n  }\n  map {\n    address\n    cityName\n    country\n    employer {\n      id\n      name\n      __typename\n    }\n    lat\n    lng\n    locationName\n    postalCode\n    stateName\n    __typename\n  }\n  overview {\n    ceo(countryId: $countryId) {\n      name\n      photoUrl\n      __typename\n    }\n    id\n    name\n    shortName\n    squareLogoUrl\n    headquarters\n    links {\n      overviewUrl\n      benefitsUrl\n      photosUrl\n      reviewsUrl\n      salariesUrl\n      __typename\n    }\n    primaryIndustry {\n      industryId\n      industryName\n      sectorName\n      sectorId\n      __typename\n    }\n    ratings {\n      overallRating\n      ceoRating\n      ceoRatingsCount\n      recommendToFriendRating\n      compensationAndBenefitsRating\n      cultureAndValuesRating\n      careerOpportunitiesRating\n      seniorManagementRating\n      workLifeBalanceRating\n      __typename\n    }\n    revenue\n    size\n    sizeCategory\n    type\n    website\n    yearFounded\n    __typename\n  }\n  reviews {\n    reviews {\n      advice\n      cons\n      countHelpful\n      employerResponses {\n        response\n        responseDateTime\n        userJobTitle\n        __typename\n      }\n      employmentStatus\n      featured\n      isCurrentJob\n      jobTitle {\n        text\n        __typename\n      }\n      lengthOfEmployment\n      pros\n      ratingBusinessOutlook\n      ratingCareerOpportunities\n      ratingCeo\n      ratingCompensationAndBenefits\n      ratingCultureAndValues\n      ratingOverall\n      ratingRecommendToFriend\n      ratingSeniorLeadership\n      ratingWorkLifeBalance\n      reviewDateTime\n      reviewId\n      summary\n      __typename\n    }\n    __typename\n  }\n  __typename\n}\n',
-        },
-    ]
+#     except Exception as e:
+#         error_message = f"Failed to extract external URL: {str(e)}"
+#         print(error_message)
+#         notify_failure(error_message, "extract_external_url")
+#         return None
 
-        response = requests.post('https://www.glassdoor.co.uk/graph', cookies=cookies, headers=headers, json=json_data)
+# def extract_description(cookies, headers, jobSearchTrackingKey, jl, queryString):
+#     """Extract job description from Glassdoor."""
+#     try:
+#         json_data = [
+#         {
+#             'operationName': 'uilTrackingMutation',
+#             'variables': {
+#                 'events': [
+#                     {
+#                         'eventType': 'JAVASCRIPT_DETECTION',
+#                         'jobSearchTrackingKey': jobSearchTrackingKey,
+#                         'pageType': 'SERP',
+#                     },
+#                 ],
+#             },
+#             'query': 'mutation uilTrackingMutation($events: [EventContextInput]!) {\n  trackEvents(events: $events) {\n    eventType\n    resultStatus\n    message\n    clickId\n    clickGuid\n    __typename\n  }\n}\n',
+#         },
+#         {
+#             'operationName': 'JobDetailQuery',
+#             'variables': {
+#                 'enableReviewSummary': True,
+#                 'jl': jl,
+#                 'queryString': queryString,
+#                 'pageTypeEnum': 'SERP',
+#                 'countryId': 2,
+#             },
+#             'query': 'query JobDetailQuery($jl: Long!, $queryString: String, $enableReviewSummary: Boolean!, $pageTypeEnum: PageTypeEnum, $countryId: Int) {\n  jobview: jobView(\n    listingId: $jl\n    contextHolder: {queryString: $queryString, pageTypeEnum: $pageTypeEnum}\n  ) {\n    ...JobDetailsFragment\n    employerReviewSummary @include(if: $enableReviewSummary) {\n      reviewSummary {\n        highlightSummary {\n          sentiment\n          sentence\n          categoryReviewCount\n          __typename\n        }\n        __typename\n      }\n      __typename\n    }\n    __typename\n  }\n}\n\nfragment JobDetailsFragment on JobView {\n  employerBenefits {\n    benefitsOverview {\n      benefitsHighlights {\n        benefit {\n          commentCount\n          icon\n          name\n          __typename\n        }\n        highlightPhrase\n        __typename\n      }\n      overallBenefitRating\n      employerBenefitSummary {\n        comment\n        __typename\n      }\n      __typename\n    }\n    benefitReviews {\n      benefitComments {\n        id\n        comment\n        __typename\n      }\n      cityName\n      createDate\n      currentJob\n      rating\n      stateName\n      userEnteredJobTitle\n      __typename\n    }\n    numReviews\n    __typename\n  }\n  employerContent {\n    managedContent {\n      id\n      type\n      title\n      body\n      captions\n      photos\n      videos\n      __typename\n    }\n    __typename\n  }\n  employerAttributes {\n    attributes {\n      attributeName\n      attributeValue\n      __typename\n    }\n    __typename\n  }\n  gaTrackerData {\n    jobViewDisplayTimeMillis\n    requiresTracking\n    pageRequestGuid\n    searchTypeCode\n    trackingUrl\n    __typename\n  }\n  header {\n    jobLink\n    adOrderId\n    ageInDays\n    applicationId\n    appliedDate\n    applyUrl\n    applyButtonDisabled\n    categoryMgocId\n    campaignKeys\n    easyApply\n    employerNameFromSearch\n    employer {\n      activeStatus\n      bestProfile {\n        id\n        __typename\n      }\n      id\n      name\n      shortName\n      size\n      squareLogoUrl\n      __typename\n    }\n    expired\n    goc\n    gocId\n    hideCEOInfo\n    indeedJobAttribute {\n      education\n      skills\n      educationLabel\n      skillsLabel\n      yearsOfExperienceLabel\n      __typename\n    }\n    isIndexableJobViewPage\n    isSponsoredJob\n    isSponsoredEmployer\n    jobTitleText\n    jobType\n    jobTypeKeys\n    jobCountryId\n    jobResultTrackingKey\n    locId\n    locationName\n    locationType\n    normalizedJobTitle\n    payCurrency\n    payPeriod\n    payPeriodAdjustedPay {\n      p10\n      p50\n      p90\n      __typename\n    }\n    profileAttributes {\n      suid\n      label\n      match\n      type\n      __typename\n    }\n    rating\n    remoteWorkTypes\n    salarySource\n    savedJobId\n    seoJobLink\n    serpUrlForJobListing\n    sgocId\n    __typename\n  }\n  job {\n    description\n    discoverDate\n    eolHashCode\n    importConfigId\n    jobTitleId\n    jobTitleText\n    listingId\n    __typename\n  }\n  map {\n    address\n    cityName\n    country\n    employer {\n      id\n      name\n      __typename\n    }\n    lat\n    lng\n    locationName\n    postalCode\n    stateName\n    __typename\n  }\n  overview {\n    ceo(countryId: $countryId) {\n      name\n      photoUrl\n      __typename\n    }\n    id\n    name\n    shortName\n    squareLogoUrl\n    headquarters\n    links {\n      overviewUrl\n      benefitsUrl\n      photosUrl\n      reviewsUrl\n      salariesUrl\n      __typename\n    }\n    primaryIndustry {\n      industryId\n      industryName\n      sectorName\n      sectorId\n      __typename\n    }\n    ratings {\n      overallRating\n      ceoRating\n      ceoRatingsCount\n      recommendToFriendRating\n      compensationAndBenefitsRating\n      cultureAndValuesRating\n      careerOpportunitiesRating\n      seniorManagementRating\n      workLifeBalanceRating\n      __typename\n    }\n    revenue\n    size\n    sizeCategory\n    type\n    website\n    yearFounded\n    __typename\n  }\n  reviews {\n    reviews {\n      advice\n      cons\n      countHelpful\n      employerResponses {\n        response\n        responseDateTime\n        userJobTitle\n        __typename\n      }\n      employmentStatus\n      featured\n      isCurrentJob\n      jobTitle {\n        text\n        __typename\n      }\n      lengthOfEmployment\n      pros\n      ratingBusinessOutlook\n      ratingCareerOpportunities\n      ratingCeo\n      ratingCompensationAndBenefits\n      ratingCultureAndValues\n      ratingOverall\n      ratingRecommendToFriend\n      ratingSeniorLeadership\n      ratingWorkLifeBalance\n      reviewDateTime\n      reviewId\n      summary\n      __typename\n    }\n    __typename\n  }\n  __typename\n}\n',
+#         },
+#     ]
+
+#         response = requests.post('https://www.glassdoor.co.uk/graph', cookies=cookies, headers=headers, json=json_data)
         
-        result = response.json()
-        description = result[1]['data']['jobview']['job']['description']
-        return description
-    except Exception as e:
-        error_message = f"Failed to extract job description: {str(e)}"
-        print(error_message)
-        notify_failure(error_message, "extract_description")
-        return "No description available"
+#         result = response.json()
+#         description = result[1]['data']['jobview']['job']['description']
+#         return description
+#     except Exception as e:
+#         error_message = f"Failed to extract job description: {str(e)}"
+#         print(error_message)
+#         notify_failure(error_message, "extract_description")
+#         return "No description available"
 
 def scrape_glassdoor_jobs(cookies, headers, url):
     """Main function to scrape Glassdoor jobs."""
+    import requests
+    import time
+    
     # Static parameters for POST
     base_url = "https://www.glassdoor.co.uk/graph"
     base_variables = {
         'excludeJobListingIds': [],
         'filterParams': [
             {'filterKey': 'maxSalary', 'values': '9000000'},
-            {'filterKey': 'minSalary', 'values': '250000'},
+            {'filterKey': 'minSalary', 'values': '30000'},
         ],
         'keyword': '',
         'locationId': 7287,
@@ -289,6 +295,78 @@ def scrape_glassdoor_jobs(cookies, headers, url):
     # Container for scraped jobs
     scraped_jobs = []
 
+    def extract_external_url(cookies, headers, queryString):
+        """Extract external URL from Glassdoor."""
+        try:
+            json_data = [
+                {
+                    'operationName': 'SerpRedirectorQuery',
+                    'variables': {
+                        'baseUrl': 'www.glassdoor.co.uk',
+                        'queryString': f'{queryString}',
+                    },
+                    'query': 'mutation SerpRedirectorQuery($applyData: ApplyDataInput, $baseUrl: String!, $queryString: String!) {\n  redirector(\n    redirectorContextInput: {applyData: $applyData, baseUrl: $baseUrl, queryString: $queryString}\n  ) {\n    redirectUrl\n    __typename\n  }\n}\n',
+                },
+            ]
+
+            response = requests.post('https://www.glassdoor.co.uk/graph', cookies=cookies, headers=headers, json=json_data)
+
+            result = response.json()
+            url = None
+            if response.status_code == 200:
+                url = result[0]['data']['redirector']['redirectUrl']
+            else:
+                url = None
+            
+            return url
+
+        except Exception as e:
+            error_message = f"Failed to extract external URL: {str(e)}"
+            print(error_message)
+            notify_failure(error_message, "extract_external_url")
+            return None
+
+    def extract_description(cookies, headers, jobSearchTrackingKey, jl, queryString):
+        """Extract job description from Glassdoor."""
+        try:
+            json_data = [
+            {
+                'operationName': 'uilTrackingMutation',
+                'variables': {
+                    'events': [
+                        {
+                            'eventType': 'JAVASCRIPT_DETECTION',
+                            'jobSearchTrackingKey': jobSearchTrackingKey,
+                            'pageType': 'SERP',
+                        },
+                    ],
+                },
+                'query': 'mutation uilTrackingMutation($events: [EventContextInput]!) {\n  trackEvents(events: $events) {\n    eventType\n    resultStatus\n    message\n    clickId\n    clickGuid\n    __typename\n  }\n}\n',
+            },
+            {
+                'operationName': 'JobDetailQuery',
+                'variables': {
+                    'enableReviewSummary': True,
+                    'jl': jl,
+                    'queryString': queryString,
+                    'pageTypeEnum': 'SERP',
+                    'countryId': 2,
+                },
+                'query': 'query JobDetailQuery($jl: Long!, $queryString: String, $enableReviewSummary: Boolean!, $pageTypeEnum: PageTypeEnum, $countryId: Int) {\n  jobview: jobView(\n    listingId: $jl\n    contextHolder: {queryString: $queryString, pageTypeEnum: $pageTypeEnum}\n  ) {\n    ...JobDetailsFragment\n    employerReviewSummary @include(if: $enableReviewSummary) {\n      reviewSummary {\n        highlightSummary {\n          sentiment\n          sentence\n          categoryReviewCount\n          __typename\n        }\n        __typename\n      }\n      __typename\n    }\n    __typename\n  }\n}\n\nfragment JobDetailsFragment on JobView {\n  employerBenefits {\n    benefitsOverview {\n      benefitsHighlights {\n        benefit {\n          commentCount\n          icon\n          name\n          __typename\n        }\n        highlightPhrase\n        __typename\n      }\n      overallBenefitRating\n      employerBenefitSummary {\n        comment\n        __typename\n      }\n      __typename\n    }\n    benefitReviews {\n      benefitComments {\n        id\n        comment\n        __typename\n      }\n      cityName\n      createDate\n      currentJob\n      rating\n      stateName\n      userEnteredJobTitle\n      __typename\n    }\n    numReviews\n    __typename\n  }\n  employerContent {\n    managedContent {\n      id\n      type\n      title\n      body\n      captions\n      photos\n      videos\n      __typename\n    }\n    __typename\n  }\n  employerAttributes {\n    attributes {\n      attributeName\n      attributeValue\n      __typename\n    }\n    __typename\n  }\n  gaTrackerData {\n    jobViewDisplayTimeMillis\n    requiresTracking\n    pageRequestGuid\n    searchTypeCode\n    trackingUrl\n    __typename\n  }\n  header {\n    jobLink\n    adOrderId\n    ageInDays\n    applicationId\n    appliedDate\n    applyUrl\n    applyButtonDisabled\n    categoryMgocId\n    campaignKeys\n    easyApply\n    employerNameFromSearch\n    employer {\n      activeStatus\n      bestProfile {\n        id\n        __typename\n      }\n      id\n      name\n      shortName\n      size\n      squareLogoUrl\n      __typename\n    }\n    expired\n    goc\n    gocId\n    hideCEOInfo\n    indeedJobAttribute {\n      education\n      skills\n      educationLabel\n      skillsLabel\n      yearsOfExperienceLabel\n      __typename\n    }\n    isIndexableJobViewPage\n    isSponsoredJob\n    isSponsoredEmployer\n    jobTitleText\n    jobType\n    jobTypeKeys\n    jobCountryId\n    jobResultTrackingKey\n    locId\n    locationName\n    locationType\n    normalizedJobTitle\n    payCurrency\n    payPeriod\n    payPeriodAdjustedPay {\n      p10\n      p50\n      p90\n      __typename\n    }\n    profileAttributes {\n      suid\n      label\n      match\n      type\n      __typename\n    }\n    rating\n    remoteWorkTypes\n    salarySource\n    savedJobId\n    seoJobLink\n    serpUrlForJobListing\n    sgocId\n    __typename\n  }\n  job {\n    description\n    discoverDate\n    eolHashCode\n    importConfigId\n    jobTitleId\n    jobTitleText\n    listingId\n    __typename\n  }\n  map {\n    address\n    cityName\n    country\n    employer {\n      id\n      name\n      __typename\n    }\n    lat\n    lng\n    locationName\n    postalCode\n    stateName\n    __typename\n  }\n  overview {\n    ceo(countryId: $countryId) {\n      name\n      photoUrl\n      __typename\n    }\n    id\n    name\n    shortName\n    squareLogoUrl\n    headquarters\n    links {\n      overviewUrl\n      benefitsUrl\n      photosUrl\n      reviewsUrl\n      salariesUrl\n      __typename\n    }\n    primaryIndustry {\n      industryId\n      industryName\n      sectorName\n      sectorId\n      __typename\n    }\n    ratings {\n      overallRating\n      ceoRating\n      ceoRatingsCount\n      recommendToFriendRating\n      compensationAndBenefitsRating\n      cultureAndValuesRating\n      careerOpportunitiesRating\n      seniorManagementRating\n      workLifeBalanceRating\n      __typename\n    }\n    revenue\n    size\n    sizeCategory\n    type\n    website\n    yearFounded\n    __typename\n  }\n  reviews {\n    reviews {\n      advice\n      cons\n      countHelpful\n      employerResponses {\n        response\n        responseDateTime\n        userJobTitle\n        __typename\n      }\n      employmentStatus\n      featured\n      isCurrentJob\n      jobTitle {\n        text\n        __typename\n      }\n      lengthOfEmployment\n      pros\n      ratingBusinessOutlook\n      ratingCareerOpportunities\n      ratingCeo\n      ratingCompensationAndBenefits\n      ratingCultureAndValues\n      ratingOverall\n      ratingRecommendToFriend\n      ratingSeniorLeadership\n      ratingWorkLifeBalance\n      reviewDateTime\n      reviewId\n      summary\n      __typename\n    }\n    __typename\n  }\n  __typename\n}\n',
+            },
+        ]
+
+            response = requests.post('https://www.glassdoor.co.uk/graph', cookies=cookies, headers=headers, json=json_data)
+            
+            result = response.json()
+            description = result[1]['data']['jobview']['job']['description']
+            return description
+        except Exception as e:
+            error_message = f"Failed to extract job description: {str(e)}"
+            print(error_message)
+            notify_failure(error_message, "extract_description")
+            return "No description available"
+    
     try:
         # Function to fetch jobs for a page
         def fetch_jobs(page_cursor, page_number):
@@ -302,6 +380,10 @@ def scrape_glassdoor_jobs(cookies, headers, url):
                 'query': 'query JobSearchResultsQuery($excludeJobListingIds: [Long!], $filterParams: [FilterParams], $keyword: String, $locationId: Int, $locationType: LocationTypeEnum, $numJobsToShow: Int!, $originalPageUrl: String, $pageCursor: String, $pageNumber: Int, $pageType: PageTypeEnum, $parameterUrlInput: String, $queryString: String, $seoFriendlyUrlInput: String, $seoUrl: Boolean, $includeIndeedJobAttributes: Boolean) {\n  jobListings(\n    contextHolder: {queryString: $queryString, pageTypeEnum: $pageType, searchParams: {excludeJobListingIds: $excludeJobListingIds, filterParams: $filterParams, keyword: $keyword, locationId: $locationId, locationType: $locationType, numPerPage: $numJobsToShow, pageCursor: $pageCursor, pageNumber: $pageNumber, originalPageUrl: $originalPageUrl, seoFriendlyUrlInput: $seoFriendlyUrlInput, parameterUrlInput: $parameterUrlInput, seoUrl: $seoUrl, searchType: SR, includeIndeedJobAttributes: $includeIndeedJobAttributes}}\n  ) {\n    companyFilterOptions {\n      id\n      shortName\n      __typename\n    }\n    filterOptions\n    indeedCtk\n    jobListings {\n      ...JobListingJobView\n      __typename\n    }\n    jobSearchTrackingKey\n    jobsPageSeoData {\n      pageMetaDescription\n      pageTitle\n      __typename\n    }\n    paginationCursors {\n      cursor\n      pageNumber\n      __typename\n    }\n    indexablePageForSeo\n    searchResultsMetadata {\n      searchCriteria {\n        implicitLocation {\n          id\n          localizedDisplayName\n          type\n          __typename\n        }\n        keyword\n        location {\n          id\n          shortName\n          localizedShortName\n          localizedDisplayName\n          type\n          __typename\n        }\n        __typename\n      }\n      footerVO {\n        countryMenu {\n          childNavigationLinks {\n            id\n            link\n            textKey\n            __typename\n          }\n          __typename\n        }\n        __typename\n      }\n      helpCenterDomain\n      helpCenterLocale\n      jobAlert {\n        jobAlertId\n        __typename\n      }\n      jobSerpFaq {\n        questions {\n          answer\n          question\n          __typename\n        }\n        __typename\n      }\n      jobSerpJobOutlook {\n        occupation\n        paragraph\n        heading\n        __typename\n      }\n      showMachineReadableJobs\n      __typename\n    }\n    serpSeoLinksVO {\n      relatedJobTitlesResults\n      searchedJobTitle\n      searchedKeyword\n      searchedLocationIdAsString\n      searchedLocationSeoName\n      searchedLocationType\n      topCityIdsToNameResults {\n        key\n        value\n        __typename\n      }\n      topEmployerIdsToNameResults {\n        key\n        value\n        __typename\n      }\n      topOccupationResults\n      __typename\n    }\n    totalJobsCount\n    __typename\n  }\n}\n\nfragment JobListingJobView on JobListingSearchResult {\n  jobview {\n    header {\n      indeedJobAttribute {\n        skills\n        extractedJobAttributes {\n          key\n          value\n          __typename\n        }\n        __typename\n      }\n      adOrderId\n      ageInDays\n      easyApply\n      employer {\n        id\n        name\n        shortName\n        __typename\n      }\n      expired\n      occupations {\n        key\n        __typename\n      }\n      employerNameFromSearch\n      goc\n      gocId\n      isSponsoredJob\n      isSponsoredEmployer\n      jobCountryId\n      jobLink\n      jobResultTrackingKey\n      normalizedJobTitle\n      jobTitleText\n      locationName\n      locationType\n      locId\n      payCurrency\n      payPeriod\n      payPeriodAdjustedPay {\n        p10\n        p50\n        p90\n        __typename\n      }\n      rating\n      salarySource\n      savedJobId\n      seoJobLink\n      __typename\n    }\n    job {\n      descriptionFragmentsText\n      importConfigId\n      jobTitleId\n      jobTitleText\n      listingId\n      __typename\n    }\n    jobListingAdminDetails {\n      userEligibleForAdminJobDetails\n      __typename\n    }\n    overview {\n      shortName\n      squareLogoUrl\n      __typename\n    }\n    __typename\n  }\n  __typename\n}\n'
             }]
             response = requests.post(base_url, cookies=cookies, headers=headers, json=json_data)
+            print(response.status_code)
+            if response.status_code != 200:
+                print(f"Request failed with status code: {response.status_code}")
+                return None
             return response.json()
 
         # Start navigation
@@ -310,62 +392,96 @@ def scrape_glassdoor_jobs(cookies, headers, url):
 
         while True:
             data = fetch_jobs(next_cursor, page_number)
+            if not data:  # Handle None response from fetch_jobs
+                error_message = f"No data returned from page {page_number}"
+                print(error_message)
+                notify_failure(error_message, "scrape_glassdoor_jobs")
+                break
+                
             try:
                 job_listings = data[0]['data']['jobListings']['jobListings']
                 pagination_cursors = data[0]['data']['jobListings']['paginationCursors']
-            except KeyError:
-                error_message = f"Stopping at page {page_number}: Unexpected response structure"
+            except (KeyError, TypeError) as e:
+                error_message = f"Stopping at page {page_number}: Unexpected response structure: {e}"
                 print(error_message)
                 notify_failure(error_message, "scrape_glassdoor_jobs")
                 break
             
             for job_item in job_listings:
-                header = job_item['jobview']['header']
-
-                _job_tracking_key = header['jobResultTrackingKey']
-                _partner_link = header['jobLink']
-
-                _job_link = header.get('seoJobLink')
-                _jl = _job_link.split('?jl=')[-1]
-
-                query_string = _partner_link.split("/partner/jobListing.htm?")[-1]
-                description = extract_description(cookies, headers, _job_tracking_key, _jl, query_string)
-
-                _partner_link = _partner_link.replace("GD_JOB_AD", "GD_JOB_VIEW")
-                external_link = extract_external_url(cookies, headers, _partner_link)
-
-                url = None
-                if not external_link:
-                    url = header.get('seoJobLink')
-                else:
-                    url = external_link
-
-                salary = None
                 try:
-                    salary = job_item['jobview']['header'].get('payPeriodAdjustedPay', {}).get('p50', None)
-                except:
-                    salary = ''
-
-                company_name = clean_name(header.get('employer', {}).get('name', ''))
-
-                if company_name not in company_list:
+                    header = job_item.get('jobview', {}).get('header', {})
+                    if not header:
+                        continue
+                        
+                    _job_tracking_key = header.get('jobResultTrackingKey')
+                    _partner_link = header.get('jobLink')
+                    
+                    if not _job_tracking_key or not _partner_link:
+                        continue
+                    
+                    _job_link = header.get('seoJobLink')
+                    if not _job_link:
+                        continue
+                        
+                    _jl = _job_link.split('?jl=')[-1] if '?jl=' in _job_link else ''
+                    
+                    query_string = _partner_link.split("/partner/jobListing.htm?")[-1] if "/partner/jobListing.htm?" in _partner_link else ''
+                    
+                    # Make sure we have valid parameters before calling extract_description
+                    if _job_tracking_key and _jl and query_string:
+                        description = extract_description(cookies, headers, _job_tracking_key, _jl, query_string)
+                    else:
+                        description = "No description available - missing required parameters"
+                    
+                    _partner_link = _partner_link.replace("GD_JOB_AD", "GD_JOB_VIEW")
+                    query_string = _partner_link.split("/partner/jobListing.htm?")[-1] if "/partner/jobListing.htm?" in _partner_link else ''
+                    external_link = extract_external_url(cookies, headers, query_string)
+                    
+                    url = _job_link if not external_link else external_link
+                    
+                    salary = None
+                    salary_data = header.get('payPeriodAdjustedPay', {})
+                    if salary_data and isinstance(salary_data, dict):
+                        salary = salary_data.get('p50')
+                    
+                    employer_data = header.get('employer', {})
+                    company_name = employer_data.get('name', '') if employer_data and isinstance(employer_data, dict) else ''
+                    
+                    if not company_name:
+                        continue
+                    
+                    # Only attempt fuzzy matching if company_list has elements
+                    score = 0
+                    match = None
+                    if company_list:
+                        try:
+                            match, score, _ = process.extractOne(company_name, company_list)
+                        except Exception as e:
+                            print(f"Error in fuzzy matching: {e}")
+                            match, score = company_name, 0
+                    
+                    if (not company_list or score > 70) and (not salary or str(salary).lower() not in ['hour', 'day', 'hourly']):
+                        overview = job_item.get('jobview', {}).get('overview', {})
+                        company_logo = overview.get('squareLogoUrl', '') if overview else ''
+                        
+                        job_entry = {
+                            "job_title": header.get('jobTitleText', ''),
+                            "company_name": company_name,
+                            "company_logo": company_logo,
+                            "salary": salary,
+                            "posted_date": f"{header.get('ageInDays', '')} days ago",
+                            "experience": None,
+                            "location": header.get('locationName', ''),
+                            "apply_link": url,
+                            "description": description,
+                            "data_source": "glassdoor"
+                        }
+                        
+                        scraped_jobs.append(job_entry)
+                        
+                except Exception as e:
+                    print(f"Error processing job item: {e}")
                     continue
-
-                job_entry = {
-                    "job_title": header.get('jobTitleText', ''),
-                    "company_name": company_name,
-                    "company_logo": job_item['jobview'].get('overview', {}).get('squareLogoUrl', ''),
-                    "salary": salary,
-                    "posted_date": f"{header.get('ageInDays', '')} days ago",
-                    "experience": None,
-                    "location": header.get('locationName', ''),
-                    "apply_link": url,
-                    "description": description,
-                    "data_source": "glassdoor"
-                }
-
-                if job_entry['company_name'] is not None:
-                    scraped_jobs.append(job_entry)
 
             print(f"Scraped page {page_number} with {len(job_listings)} jobs.")
 
@@ -401,42 +517,42 @@ def main():
         init_db()
         
         cookies = {
-        'gdId': 'a9a3794f-c3cd-4dc3-ba7a-bd24bb8cd9a2',
-        'indeedCtk': '1ipgg2g8jk8ii801',
-        'rl_page_init_referrer': 'RudderEncrypt%3AU2FsdGVkX18YwXiSsJngik2uKCMUD3VqwUx1sp%2BvgH4%3D',
-        'rl_page_init_referring_domain': 'RudderEncrypt%3AU2FsdGVkX18mTosiyE8JBUueuG8L01kt516kMhkqzq8%3D',
-        '_optionalConsent': 'true',
-        'ki_r': '',
-        'ki_s': '240196%3A0.0.0.0.0',
-        '_gcl_au': '1.1.1933671595.1745643872',
-        '_fbp': 'fb.2.1745643872476.193155387393605754',
-        'trs': 'INVALID:SEO:SEO:2021-11-29+09%3A00%3A16.8:undefined:undefined',
-        'uc': '8013A8318C98C5172ACA70CF4222A8AAD282B8714CD4AADAA8AB8B9B95BD6A3D51F4CEEA8A10DE766A74B2DA5561A91E679EDE37C16A7B1F66AF1F6FCDE359C48973A874B4F8E8FD3CFFC10792B9AEBA6A2C27B929C93FBB029090B32FA6A89ACDC1996A94C9A1B36C00CA3CEA6A05EE2A2131D99E0789229F4BA87DAC72A45A4CC89960A391E37037E1A04EEDF5BDCD',
-        'JSESSIONID': '0D5453235D5FAA154D9F54C9129B8BF6',
-        'GSESSIONID': '0D5453235D5FAA154D9F54C9129B8BF6',
-        'cass': '0',
-        'asst': '1745734925.0',
-        'rsSessionId': '1745734925461',
-        'AWSALB': 'Kvy0Tqe/BnCYdK7VR0sMFzrWdQQsjW8KedjEjr3vR4qNwEEVuh8phUmI82zacfzXifmnlV03ldRHMLJEjqcI7hs/KFKbdBjc/3gm7baEKJvHCsX6wbN61oeQM4d6',
-        'AWSALBCORS': 'Kvy0Tqe/BnCYdK7VR0sMFzrWdQQsjW8KedjEjr3vR4qNwEEVuh8phUmI82zacfzXifmnlV03ldRHMLJEjqcI7hs/KFKbdBjc/3gm7baEKJvHCsX6wbN61oeQM4d6',
-        'rsReferrerData': '%7B%22currentPageRollup%22%3A%22%2Fjob%2Fjobs-srch%22%2C%22previousPageRollup%22%3A%22%2Fjob%2Fjobs-srch%22%2C%22currentPageAbstract%22%3A%22%2FJob%2Fjobs-SRCH_%5BPRM%5D.htm%22%2C%22previousPageAbstract%22%3A%22%2FJob%2Fjobs-SRCH_%5BPRM%5D.htm%22%2C%22currentPageFull%22%3A%22https%3A%2F%2Fwww.glassdoor.co.uk%2FJob%2Fengland-uk-jobs-SRCH_IL.0%2C10_IS7287.htm%3FmaxSalary%3D9000000%26minSalary%3D250000%22%2C%22previousPageFull%22%3A%22https%3A%2F%2Fwww.glassdoor.co.uk%2FJob%2Fengland-uk-jobs-SRCH_IL.0%2C10_IS7287.htm%3FmaxSalary%3D9000000%26minSalary%3D250000%22%7D',
-        'gdsid': '1745730962237:1745737340938:E1C674D26BDAE98E7710081EDDBAF095',
-        'rl_user_id': 'RudderEncrypt%3AU2FsdGVkX18RqGpWEKY86lqrcbwcS1vUF79m2wIchDU%3D',
-        'rl_trait': 'RudderEncrypt%3AU2FsdGVkX19DoqB8uifMVvX%2BTgA5sHbj2Sr7C5TdeQhKzR1XQnMLoT1zYXOWdbrv0hMntVgl1mBoTozfl%2FndLyEUKUBvUUJ2b6WTZh2WsmZRI9pJBWCQ%2BseF4yEjqmPwUVBj0WGHSUXv%2FLNQyfGssP8zrtwE2HQmJ3qJ7jEG9HU%3D',
-        'rl_group_id': 'RudderEncrypt%3AU2FsdGVkX1%2FlkL6%2BaUQ8cypeemJg%2BAsFkSJZl7nvxH0%3D',
-        'rl_group_trait': 'RudderEncrypt%3AU2FsdGVkX1%2BqnzKmUZGdxEPM9ri43zoSJ3vqA65uhq8%3D',
-        'OptanonConsent': 'isGpcEnabled=0&datestamp=Sun+Apr+27+2025+12%3A32%3A21+GMT%2B0530+(India+Standard+Time)&version=202407.2.0&browserGpcFlag=0&isIABGlobal=false&hosts=&consentId=1eafc5e2-9db4-4939-85fe-8f9a22faffeb&interactionCount=1&isAnonUser=1&landingPath=NotLandingPage&groups=C0001%3A1%2CC0003%3A1%2CC0002%3A1%2CC0004%3A1%2CC0017%3A1&AwaitingReconsent=false',
-        'rl_anonymous_id': 'RudderEncrypt%3AU2FsdGVkX19zwRa4k11tZ7%2BdeCXa0tiSW9Srkjau%2BEan68S5ncSG2q5xYe9kf1WJzdk%2FbkmMnWx3x5NeABZG0Q%3D%3D',
-        'ki_t': '1745384200319%3B1745730968420%3B1745737343114%3B3%3B27',
-        'rl_session': 'RudderEncrypt%3AU2FsdGVkX1%2FtpypN%2BxiswjXxyD4kqoVKsoiloMLSMpCu0dfLoSCd%2BEMUmNV9BB8o6I9QTb21%2B5zFQ90g4CoQVzFFtchm4EN%2FwBNegV02%2FcsTsd31iddcZ5j0APKqp25mW8wWBbmLO78ms0AXy3V0Ng%3D%3D',
-        'at': 'eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJqdGkiOiI3NWFkZDk2Ny0yZGM3LTQwYzMtYTY1My0zODllNzBiMWEzNzUiLCJ1IjoiYmlyYXBwYS4wMDFAZ21haWwuY29tIiwidWlkIjoyMTkwNTMyMTcsInJmc2giOjE3NDU3MzgxMTI1OTUsInJtYl9pYXQiOjE3NDU2NDQwNDIyNjksInJtYl9leHAiOjE3NzcxODAwNDIyNjksImF0dCI6InJtIiwiYXV0aG9yaXRpZXMiOls0NSw0NywyOF19.e3OzGk-RsF1GNjoxTPwjaK-ZduVvzcqP1ObJfpIUPfVw1rDCe_UXzGOgnjkhec1She_jZvuq-Sz304IjiVqpMU4pNyGpFfky9R5GdP_TKliQlzi6Ij_zk2fGZBloogT8f6QkbvBPgQ9pCkCtNHZJw85YoQmyMdV07FArjyp4teYV8JU_x86krnV6iJ3DxkdMDn7gqtEPBxJfAUUAMhq4DHOuGd2J2fwSddlKJxvon5agfzvG1VpPbmDpOo_sadGwipHmahNjxebIBUhMYLq4YZw1XnSyB85_i6azAhhMS1urFwNX_a5HERdaGC0tY2zrYT_-SwXomAnQYf45RhCBVg',
-        '__cf_bm': 'NTOtGBu2LIMUvPByq5.qp4fjCwbMVYOTsaAJ2Ny.cqU-1745737514-1.0.1.1-v58GUF58D0TCNTvf9SbcgOFbrB6miX6AdnWxb6KCgXjx_jz6dr2DLU7bBheZKcG1FibUskgov8J.UwPbllsdyrruy.Ub6hYMrCLDjmEOGjI',
-        '_cfuvid': 'xRlGiXuNwfJ5DJ552sxmdPHoPVKX1nN2f7iTX2bwFHA-1745737514046-0.0.1.1-604800000',
-        'bs': 'gEIevmbRsUVADBX3VJS85w:FohxaHtapDDt3gVLDZpz8ii1RV9lruKfR6zvEdLnYNY2U6ijvKXA5XhiBGO5RPVvq_WQmV55egADEM8hemPAHmIqSFgLVdrFnuf8D0eMYn0:qS3jBMYXz2Ae0eBF4NZBc88nm365XAC0UX2S2_YThs0',
-        '_dd_s': 'rum=0&expire=1745738412988',
-        'cdArr': '0',
-        'cdzNum': '7',
-    }
+    'gdId': 'a9a3794f-c3cd-4dc3-ba7a-bd24bb8cd9a2',
+    'indeedCtk': '1ipgg2g8jk8ii801',
+    'rl_page_init_referrer': 'RudderEncrypt%3AU2FsdGVkX18YwXiSsJngik2uKCMUD3VqwUx1sp%2BvgH4%3D',
+    'rl_page_init_referring_domain': 'RudderEncrypt%3AU2FsdGVkX18mTosiyE8JBUueuG8L01kt516kMhkqzq8%3D',
+    '_optionalConsent': 'true',
+    'ki_s': '240196%3A0.0.0.0.0',
+    '_gcl_au': '1.1.1933671595.1745643872',
+    '_fbp': 'fb.2.1745643872476.193155387393605754',
+    'trs': 'INVALID:SEO:SEO:2021-11-29+09%3A00%3A16.8:undefined:undefined',
+    'uc': '8013A8318C98C5172ACA70CF4222A8AAD282B8714CD4AADAA8AB8B9B95BD6A3D51F4CEEA8A10DE766A74B2DA5561A91E679EDE37C16A7B1F66AF1F6FCDE359C48973A874B4F8E8FD3CFFC10792B9AEBA6A2C27B929C93FBB029090B32FA6A89ACDC1996A94C9A1B36C00CA3CEA6A05EE2A2131D99E0789229F4BA87DAC72A45A4CC89960A391E37037E1A04EEDF5BDCD',
+    'gdsid': '1746637369040:1746637369040:03E6818A49221FBB727DA53DF2D0FA00',
+    'asst': '1746637369.2',
+    'alr': 'https%3A%2F%2Fwww.google.com%2F',
+    'at': 'eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJqdGkiOiI3NWFkZDk2Ny0yZGM3LTQwYzMtYTY1My0zODllNzBiMWEzNzUiLCJ1IjoiYmlyYXBwYS4wMDFAZ21haWwuY29tIiwidWlkIjoyMTkwNTMyMTcsInJmc2giOjE3NDY2Mzc5NjkwMzgsInJtYl9pYXQiOjE3NDU2NDQwNDIyNjksInJtYl9leHAiOjE3NzcxODAwNDIyNjksImF0dCI6InJtIiwiYXV0aG9yaXRpZXMiOls0NSw0NywyOF19.Qf6Y1JWs84JuCb4QSZilsjEADI_qVDpu0_xrR_eWP6cQTtlT4-DGmxs1pnXtuEGd3O_rr-JAuM5MkVRf52rfzW4YcO-uhjZnLQKlUFBnj-o6mn3VZjKpbQ15vDjRmhClQLTd5nXulcUMWZ9xiXdLm9V4N9dAFPWaCRBv63K_QZks4Lhyh-agrPeA2GGFLjNU56zBh8ysgtm0f46yOyQ6HXQCNuCqWnuT4opkaVYcvbYBYUzaSMyK3D65uiBTL_MITeNoZxAXPbbAmbOcU21F4LYsXJkFsY7MzjMsDfMS0PbMtRLmNHVAGlXMyHNPKfsV4fWuENFNy0cemTKtenwFag',
+    '__cf_bm': 'fcjYd1uA232mWgY4KaoaZTVTZhkiFgEFBR.HSwfiJBQ-1746637370-1.0.1.1-OGgDoYWgoTJ.utG7VpEZNG8OGV2J5BG5_.jpBbzY_cjSbFH5tJfsS2zRKD4ATrZLjdIZd5OrTi6.toY0jsYR20P.JJe2jwxWCHxgGvDcfj4',
+    '_cfuvid': 'itM34RBWYqvVvXQj3csyZoh3CS3_zo5kFwe8qapPS_8-1746637370267-0.0.1.1-604800000',
+    'rl_user_id': 'RudderEncrypt%3AU2FsdGVkX1%2FQ6nfSWw%2FR%2BouPKxVsARFRR9yRs0PnuHk%3D',
+    'rl_trait': 'RudderEncrypt%3AU2FsdGVkX19dGTSCZajcSbqf1QNCHdLIKwxMXjcwZtsqKV5hRVHFu7m2AKvT%2BugMzfujpO5LZQMnp96ad5HT4oiHmuNylb%2FhXUbHUd5RGQpKHBPLnVLObRIGWcewCreXfKxebcNWLAKhsXtkBZvjYD8OetMZXia4%2Fam9Mm%2FtT9s%3D',
+    'rl_group_id': 'RudderEncrypt%3AU2FsdGVkX18m%2BlA3RsltZT%2FCUohH9ata3vVBn5rvCms%3D',
+    'rl_group_trait': 'RudderEncrypt%3AU2FsdGVkX196t046g0OXSXuGUgkk48NDo0SQngh76qE%3D',
+    'rl_anonymous_id': 'RudderEncrypt%3AU2FsdGVkX18xHNqgrSlXooeBJ8nV7PyGI3tWH6BZkLB316%2BO5Vi7W8F6FsBGqYoT0TgI0z%2BucpMPHJ%2BzMU%2FKXg%3D%3D',
+    'rsReferrerData': '%7B%22currentPageRollup%22%3A%22%2Fjobs%2Fjobs%22%2C%22previousPageRollup%22%3Anull%2C%22currentPageAbstract%22%3A%22%2FJobs%2F%5BEMP%5D-Jobs-E%5BEID%5D.htm%22%2C%22previousPageAbstract%22%3Anull%2C%22currentPageFull%22%3A%22https%3A%2F%2Fwww.glassdoor.co.uk%2FJobs%2FBarclays-Jobs-E3456.htm%22%2C%22previousPageFull%22%3Anull%7D',
+    'rsSessionId': '1746637367866',
+    'cdArr': '',
+    'OptanonConsent': 'isGpcEnabled=0&datestamp=Wed+May+07+2025+22%3A32%3A49+GMT%2B0530+(India+Standard+Time)&version=202407.2.0&browserGpcFlag=0&isIABGlobal=false&hosts=&consentId=1eafc5e2-9db4-4939-85fe-8f9a22faffeb&interactionCount=1&isAnonUser=1&landingPath=NotLandingPage&groups=C0001%3A1%2CC0003%3A1%2CC0002%3A1%2CC0004%3A1%2CC0017%3A1&AwaitingReconsent=false',
+    'AWSALB': '0Yasbnvg+2ZfCe3VRkoKLLpbEAmegRI86+XCJidT/xP3tjdtZ3wc8xfn5Kqa+MLonZKqk325N/8qL2jhRnnxZtlL1270XGGo0wcVXXnol4DNBtU8Rh3ZIdfVpDjn',
+    'AWSALBCORS': '0Yasbnvg+2ZfCe3VRkoKLLpbEAmegRI86+XCJidT/xP3tjdtZ3wc8xfn5Kqa+MLonZKqk325N/8qL2jhRnnxZtlL1270XGGo0wcVXXnol4DNBtU8Rh3ZIdfVpDjn',
+    'JSESSIONID': '853402DD8EF68695A1AF613959BD4B95',
+    'GSESSIONID': '853402DD8EF68695A1AF613959BD4B95',
+    'cass': '0',
+    'ki_t': '1745384200319%3B1746637371155%3B1746637371155%3B4%3B35',
+    'ki_r': 'aHR0cHM6Ly93d3cuZ29vZ2xlLmNvbS8%3D',
+    'rl_session': 'RudderEncrypt%3AU2FsdGVkX19HkY0ULevHMemvjneLJaqdBbC7coqoHgGPWM3YtPqk8qYJ5%2BFRB0JM5RQN8m%2BUGcoDsBGIPqVHcrvS5eagAeqRJsf2eazn%2B3Boz0axOI0zzwyRRkueQPR9X3gKy2kBDTA5o6dZ5GDUHA%3D%3D',
+    'bs': 'puOcH8KdNeMBK5MxI8YzAQ:3x8wGkxcQ_eDzq1ZW3FVBTNK56JiGt3I1Gg2NmucAYPwu0QWPn0pZejMadUL89BDKsHjMxA9lo2HIJtOf5cZPYjlENHEEEjDmkAnZYFNtjw:exM3RUP7xnbSmJeECByRwpbaeIIOHyYwUX63JQuevt0',
+    '_dd_s': 'rum=0&expire=1746638507213',
+}
         
         headers = {
             'accept': '*/*',
@@ -466,7 +582,8 @@ def main():
         
         # First, delete existing Glassdoor jobs
         delete_jobs_by_source("glassdoor")
-        
+        get_company_list()
+
         total_jobs = []
         # Scrape new jobs
         urls = [
