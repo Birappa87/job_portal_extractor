@@ -272,11 +272,10 @@ def extract_job_details(html):
             company_name = company_tag.get_text(strip=True) if company_tag else None
             job_data['company'] = company_name
             
-            # Print for debugging
             clean_company_name = clean_name(company_name)
 
             try:
-                match, score, _ = process.extractOne(company_name, company_list)
+                match, score, _ = process.extractOne(clean_company_name, company_list)
             except Exception as e:
                 print(f"Error in fuzzy matching: {e}")
                 match, score = company_name, 0
