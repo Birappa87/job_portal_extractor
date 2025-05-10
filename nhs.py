@@ -323,6 +323,11 @@ def scrape_all_pages():
                 if job_url:
                     # Add delay to avoid being rate-limited
                     time.sleep(1)
+                    description = extract_description(job_url)
+
+                    if 'This job is now closed' in description:
+                        continue
+                    
                     job['description'] = extract_description(job_url)
                 matched_jobs.append(job)
             
