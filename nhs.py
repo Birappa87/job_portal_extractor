@@ -328,9 +328,9 @@ def scrape_all_pages():
             
             page += 1
             
-            # Break after first page for testing
-            if page > 2:
-                break
+            # # Break after first page for testing
+            # if page > 2:
+            #     break
             
         except requests.RequestException as e:
             error_message = f"Error fetching page {page}: {str(e)}"
