@@ -249,6 +249,14 @@ def scrape_simplyhired():
         'shk': '1ips6rrfjgfu5801',
         '_ga': 'GA1.1.862499209.1745777194',
         'OptanonAlertBoxClosed': '2025-04-27T18:07:27.374Z',
+        'csrf': '-XSXtvnsK_kZpBd6Q7N9WnT2Cy1PpdNSh5utX3a7s8i0ClQhx6trzVg17gnpD5FvqpnrL35P2YhaQetC1AwG',
+        '__cf_bm': '8uimCi0sprxQPwL6aO10SdkI7jb6toR5dNjCXK9ZtCY-1746887261-1.0.1.1-Vpc.lQ39Xdu7XHwneAkQIasMymT1qPw8sWiBylFvcw1V63f5yMxZHkydBKc7qOkDZJgo66s1hotefIG9hVuCt9mIKR4XcyeywH.jazxsCZE',
+        '_cfuvid': 'PU9d0p5Qu1egK3R6GAAGr0obUpDo28T1kGAghz6mMyM-1746887261257-0.0.1.1-604800000',
+        'session-cookie': 'Fe26.2*1*d7da03e97c82d5530a96e15ac2d2516b3c482759328b5dfb3c9ebe92c8508c1d*8s8wbMWRGo2lHsAEP8h8gg*od81XADB9AYZmVnssqMdVnPEBTseeV3Q1jH6TacmI7_ZOI3v1UMyF-KLizBTGnUKE4WS9OA1Y1i-h6K09QCvy1-Z3hjv7DAA6eNub_6SWD-bBl0_QzAxqcaoy-LDQOmiCBBcCeGQjRerOj1jr4YSfcUGa-yGKGiWgi8pG43o06I-J1sdJ_9RXLM8LAmEyiNSfRlBeJKp3-I3bsFd4OkkK0SvGrbahMD-WSCVDuSgO-KVh11F89YZ3A29S2lSRDcaeS97WB5S7gERPhg0uBbcdI4enPiAbFS5VyZFn3o0eNxQiU3tqgVKegSqe0zA0_JZYJx4LLlnmRSYSSvXID2xJx58VAV_-wt6gGLmhAMIurlc8s6nZkrERUsOxSWg5wPya7y-I_sZWADyUHEPdSJ1Ano9KDyXGDcTWSJn1JdPptIEPJHf8UUIoRRaEjkLB_2i1L6IiyR75yDeMzlgr5E-qBjwU_C_A2V9CmMRjFb59oSKJmRB-unqBHF5ESKf0qPchF5yBdrer2SKI94ajj5akoQ8qaO8KMmGbiWepgHxLkibUSe4-erT5a1eY4b1ELYZ2cL0uyyvjj3YQpq0s_AXpyKHvc3wGelQ1xwP6DDCZ05scPjioTr4akki7a_N1QdF0s0Y54JBShQj7F_tqHEVC8GOZxtfViPKsbHb8i17fh28beEgI06wWFnb1uH3mTMPjtBbow6y5UlzdKqTqvGov6BkSg_qBLhVnjqj19tnJHrQRNPU40wX7kq8Jd7c3SCC5sva6rTdRAhtYH-AUCGjNJi9dn_L1pzzja1mhSWdRIQ5WORzHH97_5bsQkwlAQ6joXJnrjzo0ANJHdYccgm0-DMwfxjgF1cc9Z6ikgSHTwCbYk-aODH2bvxVyw2uO0-QAs6cW_Q8PuOBgcX_H9zPORBfmqOiZQSc88ZuYQge-g48JpHzcvf5EMakBgz0rzfXomce5Pj0p_RtP9Ql9VoB2vu3NYUWG0k3Ss3fbVfa4EZZ4bOQhia_aM-PELfpTIjaTb7bz4hLK-K2Qv3g5kcsDMtkNoOV2T-3RmfBSJ6Umoq-Xoq0Vcp-il-VUaVfHmsZ_D3iULVfTljdT6d0rbiLrA*1748183299543*98b9c704f66a3980241230a38e244765e541c685f2ac016b3fc0b7fe19ff4697*BUtPrOT6MsR5HA6Rs5KYNlrlEsRgRlqYXvRlFQyBkWk~2',
+        'clc': '70f68a24ed55d695',
+        'OptanonConsent': 'isGpcEnabled=0&datestamp=Sat+May+10+2025+20%3A02%3A46+GMT%2B0530+(India+Standard+Time)&version=202308.2.0&browserGpcFlag=0&isIABGlobal=false&hosts=&consentId=a5f7e5f6-9cf7-4e93-90ca-0f201a3dd35e&interactionCount=1&landingPath=NotLandingPage&groups=C0001%3A1%2CC0002%3A0%2CC0003%3A0%2CC0004%3A0%2CC0007%3A0&geolocation=%3B&AwaitingReconsent=false',
+        'rq': '%5B%22q%3D%26l%3DUnited%2BKingdom%26ts%3D1746887579759%22%2C%22q%3D%26l%3Dunited%2Bkingdom%26ts%3D1745997846901%22%2C%22q%3Dbarclays%26l%3Dlondon%26ts%3D1745997651433%22%2C%22q%3Dbarclays%26l%3Dunited%2Bkingdom%26ts%3D1745995603580%22%5D',
+        '_ga_9GC5K2RCSP': 'GS2.1.s1746887566$o7$g1$t1746887578$j0$l0$h0',
     }
 
     headers = {
