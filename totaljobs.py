@@ -11,6 +11,7 @@ import traceback
 from sqlalchemy import create_engine, Column, Integer, String, Text, Date
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
+from rapidfuzz import process
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, 
@@ -153,6 +154,7 @@ def get_company_list():
         df = pd.read_csv(r"data/2025-04-04_-_Worker_and_Temporary_Worker.csv")
         df['Organisation Name'] = df['Organisation Name'].apply(clean_name)
         company_list = list(df['Organisation Name'])
+
         logger.info(f"✅ Loaded {len(company_list)} companies from CSV")
     except Exception as e:
         notify_failure(f"Failed to load company list: {str(e)}", "get_company_list")
@@ -279,9 +281,19 @@ def extract_job_data_and_pagination(html_content: str, current_page: int) -> Tup
             for job in job_items:
                 # Clean and check company name
                 raw_company = job.get('companyName', 'N/A')
-                if clean_name(raw_company) not in company_list:
+                try:
+                    match, score, _ = process.extractOne(raw_company, company_list)
+                except Exception as e:
+                    print(f"Error in fuzzy matching: {e}")
+                    match, score = company_name, 0
+                
+                if score < 70:
                     continue
                 
+                salary = job.get('salary', 'N/A')
+                if any(unit in salary for unit in ['per hour', 'hourly', 'an hour', 'a day', 'per day', '/hour', '/day']):
+                    continue
+
                 # Extract job data
                 job_data = {
                     'job_id': job.get('id'),
@@ -305,7 +317,7 @@ def extract_job_data_and_pagination(html_content: str, current_page: int) -> Tup
                 job_data['labels'] = job.get('badges', [])
                 if isinstance(job_data['labels'], list) and job_data['labels']:
                     job_data['experience'] += f" - {', '.join([b.get('text', '') for b in job_data['labels'] if 'text' in b])}"
-                
+
                 jobs.append(job_data)
                 
             logger.info(f"Extracted {len(jobs)} matching jobs from preloaded state on page {current_page}")
@@ -416,6 +428,9 @@ if __name__ == "__main__":
                 # Extract job data and get next page URL
                 job_listings, next_page_url = extract_job_data_and_pagination(html_content, current_page)
 
+                if current_page == 2:
+                    break
+
                 # Add jobs to our collection
                 if job_listings:
                     all_jobs.extend(job_listings)
@@ -443,12 +458,7 @@ if __name__ == "__main__":
                 error_msg = f"Error processing page {current_page}: {str(page_error)}"
                 logger.error(error_msg)
                 notify_failure(error_msg, f"Page {current_page}")
-
-                if next_page_url:
-                    current_url = next_page_url
-                    current_page += 1
-                else:
-                    break
+                raise
 
         # After all pages are processed, insert jobs to database
         if all_jobs:

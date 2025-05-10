@@ -12,7 +12,6 @@ from datetime import datetime
 from bs4 import BeautifulSoup
 import logging
 import html
-from rnet import Client, Impersonate
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
 from sqlalchemy import create_engine, Column, Integer, String, Text, Date
 from sqlalchemy.ext.declarative import declarative_base
@@ -24,7 +23,16 @@ TOKEN = '7844666863:AAF0fTu1EqWC1v55oC25TVzSjClSuxkO2X4'
 chat_id = None
 company_list = []
 company_name_map = {}
+# Use a session for all requests
+session = requests.Session()
+# Add headers to mimic a real browser
+session.headers.update({
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
+    'Accept-Language': 'en-US,en;q=0.9',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+})
 
+# Create temp directory only once
 temp_dir = os.path.join(tempfile.gettempdir(), f"playwright_{uuid.uuid4().hex}")
 os.makedirs(temp_dir, exist_ok=True)
 
@@ -73,7 +81,7 @@ def get_chat_id(TOKEN: str) -> str:
     """Fetches the chat ID from the latest Telegram bot update."""
     try:
         url = f"https://api.telegram.org/bot{TOKEN}/getUpdates"
-        response = requests.get(url)
+        response = session.get(url)
         info = response.json()
         chat_id = info['result'][0]['message']['chat']['id']
         return chat_id
@@ -86,7 +94,7 @@ def send_message(TOKEN: str, message: str, chat_id: str):
     """Sends a message using Telegram bot."""
     try:
         url = f"https://api.telegram.org/bot{TOKEN}/sendMessage?chat_id={chat_id}&text={message}"
-        response = requests.get(url)
+        response = session.get(url)
         if response.status_code == 200:
             print("Sent message successfully")
         else:
@@ -129,14 +137,12 @@ def get_company_list():
     global company_list, company_name_map
     try:
         df = pd.read_csv(r"data/2025-04-04_-_Worker_and_Temporary_Worker.csv")
+        # Pre-compute cleaned names once
         df['Clean Name'] = df['Organisation Name'].apply(clean_name)
         company_list = list(df['Clean Name'])
         
         # Create a mapping from raw names to cleaned names for reference
-        for idx, row in df.iterrows():
-            original = row['Organisation Name']
-            cleaned = row['Clean Name']
-            company_name_map[cleaned] = original
+        company_name_map = dict(zip(df['Clean Name'], df['Organisation Name']))
             
         print(f"Loaded {len(company_list)} companies from CSV")
     except Exception as e:
@@ -144,39 +150,12 @@ def get_company_list():
         notify_failure(error_message, "get_company_list")
         raise
 
-def is_company_in_list(company_name):
-    """Checks if a company name is in the target list using improved matching."""
-    try:
-        if not company_name:
-            return False
-        
-        clean_company = clean_name(company_name)
-        
-        # Exact match
-        if clean_company in company_list:
-            return True
-            
-        # Try partial matching for companies with longer names
-        for target_company in company_list:
-            # If either name contains the other completely
-            if clean_company in target_company or target_company in clean_company:
-                # Only match if the contained part is substantial (at least 5 chars)
-                if len(clean_company) >= 5 and len(target_company) >= 5:
-                    print(f"Fuzzy match found: '{company_name}' matches '{company_name_map.get(target_company, target_company)}'")
-                    return True
-        
-        return False
-    except Exception as e:
-        error_message = f"Failed to check company in list: {str(e)}"
-        notify_failure(error_message, "is_company_in_list")
-        return False
-
 
 def remove_duplicates(jobs_list):
     """Removes duplicate job listings based on job URL."""
     try:
-        unique_jobs = []
-        seen_urls = set()
+        # Use a dictionary for faster duplicate checking
+        unique_jobs = {}
         
         for job in jobs_list:
             # Use job URL as unique identifier
@@ -188,12 +167,12 @@ def remove_duplicates(jobs_list):
             else:
                 job_identifier = job_url
                 
-            if job_identifier not in seen_urls:
-                seen_urls.add(job_identifier)
-                unique_jobs.append(job)
+            # Only keep the first occurrence of each unique job
+            if job_identifier not in unique_jobs:
+                unique_jobs[job_identifier] = job
         
         print(f"Removed {len(jobs_list) - len(unique_jobs)} duplicate jobs")
-        return unique_jobs
+        return list(unique_jobs.values())
     except Exception as e:
         error_message = f"Failed to remove duplicates: {str(e)}"
         notify_failure(error_message, "remove_duplicates")
@@ -206,53 +185,74 @@ async def human_delay(min_seconds=1, max_seconds=3):
 
 
 def extract_job_description(html_content):
-    soup = BeautifulSoup(html_content, "html.parser")
-    script_tag = soup.find("script", type="application/ld+json")
-    
-    if not script_tag:
-        return None
-
     try:
+        soup = BeautifulSoup(html_content, "html.parser")
+        script_tag = soup.find("script", type="application/ld+json")
+        
+        if not script_tag:
+            return None
+
         job_json = json.loads(script_tag.string)
         raw_description = job_json.get("description", "")
         decoded_description = html.unescape(raw_description)
         return decoded_description
-    except json.JSONDecodeError:
+    except (json.JSONDecodeError, Exception) as e:
+        print(f"Error extracting job description: {e}")
         return None
 
 
-async def parse_url(url):
-    client = Client(impersonate=Impersonate.Firefox136)
-    resp = await client.get(url)
-    print("Status Code: ", resp.status_code)
-    
-    content = await resp.text()
-
-    soup = BeautifulSoup(content, "html.parser")
-    description = extract_job_description(content)
-
+def get_external_url_and_description(url):
+    """Use regular requests instead of rnet to get the external URL and description"""
     try:
-        external_url = soup.find('code', id='applyUrl')
-        if external_url:
-            external_url = external_url.string
-        else:
-            external_url = url
-    except:
-        external_url = url
+        # Add jitter to avoid rate limiting
+        time.sleep(random.uniform(1, 3))
+        
+        response = session.get(url, timeout=10)
+        if response.status_code != 200:
+            print(f"Failed to get page: {response.status_code}")
+            return url, None
+            
+        content = response.text
+        soup = BeautifulSoup(content, "html.parser")
+        description = extract_job_description(content)
 
-    return external_url, description
-
-
-async def get_external_url(url):
-    try:
-        time.sleep(random.randint(1, 5))
-        return await parse_url(url)
+        # Try to find external URL
+        external_url = url  # Default to original URL
+        try:
+            url_element = soup.find('code', id='applyUrl')
+            if url_element:
+                external_url = url_element.string
+        except Exception as e:
+            print(f"Error finding external URL: {e}")
+            
+        return external_url, description
     except Exception as e:
-        print(f"Error getting external URL: {e}")
+        print(f"Error in get_external_url_and_description: {e}")
         return url, None
 
 
-def extract_job_details(html):
+# Pre-compute fuzzy matching threshold to avoid recomputation
+def precompute_fuzzy_matcher():
+    """Create a function that efficiently checks if a company name matches our target list"""
+    if not company_list:
+        # If no company list, everything matches
+        return lambda name: (True, 100)
+    
+    def matcher(name):
+        try:
+            clean_company_name = clean_name(name)
+            if not clean_company_name:
+                return (False, 0)
+                
+            match, score, _ = process.extractOne(clean_company_name, company_list)
+            return (score > 70, score)
+        except Exception:
+            return (False, 0)
+            
+    return matcher
+
+
+def extract_job_details(html, company_matcher):
     try:
         soup = BeautifulSoup(html, 'html.parser')
         job_listings = []
@@ -272,18 +272,14 @@ def extract_job_details(html):
             company_name = company_tag.get_text(strip=True) if company_tag else None
             job_data['company'] = company_name
             
-            clean_company_name = clean_name(company_name)
-
-            try:
-                match, score, _ = process.extractOne(clean_company_name, company_list)
-            except Exception as e:
-                print(f"Error in fuzzy matching: {e}")
-                match, score = company_name, 0
+            # Use precomputed matcher
+            is_match, score = company_matcher(company_name)
             
             salary_tag = job.select_one('ul.job-card-container__metadata-wrapper span[dir="ltr"]')
             salary = salary_tag.get_text(strip=True) if salary_tag else None
 
-            if (not company_list or score > 70) and (not salary or str(salary).lower() not in ['hour', 'day', 'hourly']):
+            # Include job if it matches our company filter and salary filter
+            if is_match and (not salary or str(salary).lower() not in ['hour', 'day', 'hourly']):
                 matching_jobs += 1
 
                 location_tag = job.select_one('span.job-search-card__location')
@@ -304,7 +300,6 @@ def extract_job_details(html):
                 job_data['description'] = None
                 job_listings.append(job_data)
 
-
         print(f"📊 Extraction stats: {matching_jobs}/{total_jobs} jobs matched target companies")
         return job_listings
     except Exception as e:
@@ -313,28 +308,57 @@ def extract_job_details(html):
         return []
 
 
-async def process_job_urls(job_listings):
-    """Process all job URLs to get external URLs and descriptions asynchronously"""
-    tasks = []
-    for job in job_listings:
-        if job.get('job_url'):
-            tasks.append(get_external_url(job['job_url']))
-    
-    # Process all URLs concurrently for better performance
-    if tasks:
-        results = await asyncio.gather(*tasks)
+async def process_job_urls(job_listings, max_concurrent=5):
+    """Process job URLs in batches with throttling to avoid rate-limiting"""
+    if not job_listings:
+        return job_listings
         
-        # Update job listings with results
-        for i, (external_url, description) in enumerate(results):
-            if i < len(job_listings):
-                job_listings[i]['job_url'] = external_url.replace('"', '')
-                job_listings[i]['description'] = description
+    # Function to process a batch of jobs
+    async def process_batch(batch):
+        tasks = []
+        for job in batch:
+            if not job.get('job_url'):
+                continue
+                
+            # Create a task for this URL
+            task = asyncio.create_task(
+                asyncio.to_thread(
+                    get_external_url_and_description,
+                    job['job_url']
+                )
+            )
+            tasks.append((job, task))
+            
+        # Wait for all tasks in this batch to complete
+        for job, task in tasks:
+            try:
+                external_url, description = await task
+                job['job_url'] = external_url.replace('"', '') if external_url else job['job_url']
+                job['description'] = description
+            except Exception as e:
+                print(f"Error processing job URL: {e}")
+                
+        return batch
+        
+    # Process jobs in batches to limit concurrency
+    updated_jobs = []
+    batch_size = max_concurrent
     
-    return job_listings
+    for i in range(0, len(job_listings), batch_size):
+        batch = job_listings[i:i+batch_size]
+        print(f"Processing batch {i//batch_size + 1}/{(len(job_listings) + batch_size - 1)//batch_size} with {len(batch)} jobs")
+        processed_batch = await process_batch(batch)
+        updated_jobs.extend(processed_batch)
+        
+        # Add a small delay between batches to avoid rate limiting
+        if i + batch_size < len(job_listings):
+            await human_delay(1, 2)
+    
+    return updated_jobs
 
 
 def insert_jobs_to_db(job_listings):
-    """Delete all jobs with data_source='linkedin' and insert new jobs"""
+    """Efficiently insert new jobs without deleting all existing records"""
     if not job_listings:
         logger.info("No jobs to insert into database")
         return 0
@@ -344,37 +368,43 @@ def insert_jobs_to_db(job_listings):
     try:
         session = Session()
         try:
-            # Delete all existing records with data_source='linkedin'
-            logger.info("Deleting all existing LinkedIn jobs from database...")
-            deleted_count = session.query(Job).filter(Job.data_source == 'linkedin').delete()
-            logger.info(f"Deleted {deleted_count} existing LinkedIn jobs")
+            # Get existing LinkedIn job URLs to avoid duplicates
+            existing_jobs = session.query(Job.apply_link).filter(Job.data_source == 'linkedin').all()
+            existing_urls = {job[0] for job in existing_jobs}
             
-            # Insert new records
-            logger.info(f"Inserting {len(job_listings)} new jobs...")
+            # Create a batch of jobs to insert
+            jobs_to_insert = []
             for job in job_listings:
-                try:
-                    # Create new job object
-                    new_job = Job(
-                        job_title=job.get('title', ''),
-                        company_name=job.get('company', ''),
-                        company_logo=job.get('logo_url', ''),
-                        salary=job.get('salary', '') if job.get('salary') else None,
-                        posted_date=job.get('posted_time', ''),
-                        experience='Full-time',  # Default or extract from job data if available
-                        location=job.get('location', '') if job.get('location') else None,
-                        apply_link=job.get('job_url', ''),
-                        description=job.get('description', ''),
-                        data_source='linkedin'
-                    )
+                job_url = job.get('job_url', '')
+                
+                # Skip if this URL already exists in the database
+                if job_url in existing_urls:
+                    continue
                     
-                    session.add(new_job)
-                    inserted_count += 1
-                except Exception as e:
-                    logger.error(f"Error processing job object: {str(e)}")
+                # Create new job object
+                new_job = Job(
+                    job_title=job.get('title', ''),
+                    company_name=job.get('company', ''),
+                    company_logo=job.get('logo_url', ''),
+                    salary=job.get('salary', '') if job.get('salary') else None,
+                    posted_date=job.get('posted_time', ''),
+                    experience='Full-time',  # Default or extract from job data if available
+                    location=job.get('location', '') if job.get('location') else None,
+                    apply_link=job_url,
+                    description=job.get('description', ''),
+                    data_source='linkedin'
+                )
+                
+                jobs_to_insert.append(new_job)
+                inserted_count += 1
             
-            # Commit the changes
-            session.commit()
-            logger.info(f"Successfully inserted {inserted_count} new jobs")
+            # Bulk insert all jobs at once
+            if jobs_to_insert:
+                session.bulk_save_objects(jobs_to_insert)
+                session.commit()
+                logger.info(f"Updated database: Inserted {inserted_count} new jobs")
+            else:
+                logger.info("No new jobs to insert")
             
         except Exception as e:
             error_message = f"Database operation error: {str(e)}"
@@ -490,7 +520,6 @@ async def close_popups(page):
     except Exception as e:
         error_message = f"Error handling popups: {str(e)}"
         print(error_message)
-        notify_failure(error_message, "close_popups")
 
 
 async def check_page_content_updated(page, previous_job_count):
@@ -513,13 +542,14 @@ async def check_page_content_updated(page, previous_job_count):
         return False, previous_job_count
 
 
-async def load_all_jobs():
-    global chat_id  # Declare chat_id as global within this function
+async def load_all_jobs(max_pages=15):
+    """Load jobs with a maximum page limit to prevent endless scraping"""
+    global chat_id
     
     async with async_playwright() as p:
         # Launch browser with stealth mode
         browser = await p.chromium.launch(
-            headless=True,  # Set to True for production
+            headless=True,
         )
         
         # Create a browser context with specific options to avoid detection
@@ -536,7 +566,6 @@ async def load_all_jobs():
             Object.defineProperty(navigator, 'webdriver', {
                 get: () => false
             });
-            // If needed, override more properties here
         """)
         
         page = await context.new_page()
@@ -550,6 +579,9 @@ async def load_all_jobs():
             
             total_jobs = []
             processed_page_count = 0
+            
+            # Create the fuzzy matcher once
+            company_matcher = precompute_fuzzy_matcher()
             
             # LinkedIn jobs search URL
             URL = "https://www.linkedin.com/jobs/search/?currentJobId=4218290146&f_E=4&f_JT=F&f_SB2=42&f_TPR=r2592000&f_WT=1%2C3&geoId=101165590&keywords=&location=United%20Kingdom&origin=JOB_SEARCH_PAGE_JOB_FILTER"
@@ -568,7 +600,8 @@ async def load_all_jobs():
             # Close any initial popups
             await close_popups(page)
             
-            while True:
+            # Main loop - with max page limit for safety
+            while processed_page_count < max_pages:
                 await close_popups(page)
                 
                 # Scroll smoothly for more human-like behavior
@@ -584,10 +617,7 @@ async def load_all_jobs():
                 
                 # Get page content and extract jobs
                 page_content = await page.content()
-                jobs = extract_job_details(page_content)
-                
-                # Process the job URLs to get external URLs and descriptions
-                jobs = await process_job_urls(jobs)
+                jobs = extract_job_details(page_content, company_matcher)
                 
                 # Add new jobs to our list
                 total_jobs.extend(jobs)
@@ -678,6 +708,10 @@ async def load_all_jobs():
             # Final deduplication
             total_jobs = remove_duplicates(total_jobs)
             
+            # Process job URLs in batches - this is now done after all scraping to avoid rate-limiting during page navigation
+            print("Processing job URLs to get external links and descriptions...")
+            total_jobs = await process_job_urls(total_jobs, max_concurrent=5)
+            
             # Save to database
             insert_jobs_to_db(total_jobs)
             
@@ -723,37 +757,6 @@ async def main():
     except Exception as e:
         error_message = f"Critical failure in main execution: {str(e)}"
         notify_failure(error_message, "main_execution")
-
-
-# Optional - Function to deduplicate an existing JSON file
-def deduplicate_existing_json(filepath="linkedin_filtered_jobs.json"):
-    """Removes duplicates from an existing JSON file."""
-    global chat_id  # Declare chat_id as global within this function
-    
-    try:
-        print(f"Deduplicating existing file: {filepath}")
-        
-        # Load existing data
-        with open(filepath, 'r', encoding='utf-8') as file:
-            existing_jobs = json.load(file)
-            
-        original_count = len(existing_jobs)
-        print(f"Original job count: {original_count}")
-        
-        # Remove duplicates
-        unique_jobs = remove_duplicates(existing_jobs)
-        
-        # Save deduped data
-        with open(filepath, 'w', encoding='utf-8') as file:
-            json.dump(unique_jobs, file, indent=2, ensure_ascii=False)
-            
-        print(f"Deduplication complete: {original_count} → {len(unique_jobs)} jobs")
-        return len(unique_jobs)
-    except Exception as e:
-        error_message = f"Error in deduplicate_existing_json: {str(e)}"
-        print(error_message)
-        notify_failure(error_message, "deduplicate_existing_json")
-        return 0
 
 
 if __name__ == "__main__":
