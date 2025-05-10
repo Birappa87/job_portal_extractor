@@ -30,6 +30,7 @@ session.headers.update({
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
     'Accept-Language': 'en-US,en;q=0.9',
     'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+    'cookie': 'bcookie="v=2&9c1ba741-33da-4490-8353-5e517c9fd006"; bscookie="v=1&20250420052037987ea26a-cc0f-4320-8738-bab240e7ed82AQE5aX3HpB52lDvEcJoSrxW3Ms69-rWj"; g_state={"i_l":0}; liap=true; JSESSIONID="ajax:8674298354585969947"; timezone=Asia/Calcutta; li_theme=light; li_theme_set=app; li_sugr=ee0ebf58-1d14-4d75-aa66-8efde35e8705; _guid=fe7e0ed1-05c0-4b73-b650-533efb753ce5; dfpfpt=5226265fe928420987c82aace8f33c11; aam_uuid=15281811367215937931823568750685877660; _gcl_au=1.1.1725562269.1745126453.1634867191.1745138867.1745138867; AnalyticsSyncHistory=AQIulSiDQDy4AgAAAZat94p5DJKR_mR6FycLlQrlCYqsOnTNsqMjnk4BiP3M9hxDh8yYbRA06EjtfZX5R-w6ew; lms_ads=AQG5sQftbUvZRAAAAZat94xp8KGTY7Zm9PlkX4cQV6ZL350sHgYXIuAWdV3szOoTGIBWHk2giiZygASYRvx_Ekw6vbzVVdwt; lms_analytics=AQG5sQftbUvZRAAAAZat94xp8KGTY7Zm9PlkX4cQV6ZL350sHgYXIuAWdV3szOoTGIBWHk2giiZygASYRvx_Ekw6vbzVVdwt; li_at=AQEDASx0kQIAfLf8AAABllGkWS0AAAGW0gQQRU4AWEDKXMnZca3sVxEGK7upbWx8fEAYlw8x9cXdyDf3yEbcInmKJaqL1paheVCFLXeGndLbr401GEbqEu9Sql5r7KhtQCUN_bjL2EWesfXVhfXRvIyY; lang=v=2&lang=en-us; AMCVS_14215E3D5995C57C0A495C55%40AdobeOrg=1; AMCV_14215E3D5995C57C0A495C55%40AdobeOrg=-637568504%7CMCIDTS%7C20219%7CMCMID%7C15836129612716252261837944879390426711%7CMCAAMLH-1747488102%7C12%7CMCAAMB-1747488102%7C6G1ynYcLPuiQxYZrsz_pkqfLG9yMXBpb2zX5dvJdYQJzPXImdj0y%7CMCOPTOUT-1746890502s%7CNONE%7CMCCIDH%7C906603343%7CvVersion%7C5.1.1; fptctx2=taBcrIH61PuCVH7eNCyH0B9zcK90d%252bIeoo1r5v7Zc25F352gmAMPQk0PxTB%252f2M7huaYqAZXls1dbLHadNpQvr6WcyIqsQnbTi9obL%252bLsH1LHy%252fDbDQKyATX%252fVGsvhAEgqYK70ezsmjSCaG3AEHJVp2HBdFXyx04ZEb542OPp2EBFzV4iUiQhTY9c4rFchQ5sVWGNmqL1ahzDoVK0MZmb7IBxZFrQqCN%252f0niONWZvgowolnLVxQ0vaT7VwnDjqFY%252bNcl64pPzBHYnaFjqH1Xt9gOSEfwrLvti8XBqCvXOo8V2IKc%252bpQHA4BPoRA6EfaKk40iGSvNaN62MHcZ0nbFaWV3a4OuDlrk9IICO7L4u9G0%253d; UserMatchHistory=AQIqM82_9_1PsAAAAZa6YrSkcmRISyOrlKNFpBNW7Q7kFZM5b_NoDUS5AA9V5oh7yxIHPuzKIIO84_HXh5Hb_WGAUzYGpcoi5Q76dmryqo6dyEh-kVOiq8d8R265Kwm4ir4eNt97HaXZHvDvVM_cKvWMiUMoz4UYT7ZvqxUpGVZp7rRb6qDl8B0XJUHJ1i_QXSk4pRhavp40JsAoqE9CgF07rdPXwbV7pAWk0pe9nH-mxA6S53YUXPmOxSKc8U5RIVEKdWQUIthAp5n_dfVgjFUE6PwZ11C37n8oFhlE7BB4VMncpOD8qqMf9MdpgSOpYKmL6QG0csG76md7fbf6B5qTJHBBQtkNd5w0EnY1RPaaWyuW9Q; lidc="b=OB02:s=O:r=O:a=O:p=O:g=4682:u=2451:x=1:i=1746883754:t=1746894920:v=2:sig=AQE3GJN1sujOea79fIa9WjrCyT3Fmdgq"',
 })
 
 # Create temp directory only once
@@ -216,8 +217,8 @@ def get_external_url_and_description(url):
         soup = BeautifulSoup(content, "html.parser")
         description = extract_job_description(content)
 
-        # Try to find external URL
-        external_url = url  # Default to original URL
+        
+        external_url = url
         try:
             url_element = soup.find('code', id='applyUrl')
             if url_element:
@@ -235,7 +236,6 @@ def get_external_url_and_description(url):
 def precompute_fuzzy_matcher():
     """Create a function that efficiently checks if a company name matches our target list"""
     if not company_list:
-        # If no company list, everything matches
         return lambda name: (True, 100)
     
     def matcher(name):
@@ -579,8 +579,7 @@ async def load_all_jobs(max_pages=15):
             
             total_jobs = []
             processed_page_count = 0
-            
-            # Create the fuzzy matcher once
+
             company_matcher = precompute_fuzzy_matcher()
             
             # LinkedIn jobs search URL
