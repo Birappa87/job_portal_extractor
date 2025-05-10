@@ -392,7 +392,8 @@ def scrape_glassdoor_jobs(cookies, headers, url):
 
         while True:
             data = fetch_jobs(next_cursor, page_number)
-            if not data:  # Handle None response from fetch_jobs
+
+            if not data:
                 error_message = f"No data returned from page {page_number}"
                 print(error_message)
                 notify_failure(error_message, "scrape_glassdoor_jobs")
@@ -431,7 +432,7 @@ def scrape_glassdoor_jobs(cookies, headers, url):
                     if _job_tracking_key and _jl and query_string:
                         description = extract_description(cookies, headers, _job_tracking_key, _jl, query_string)
                     else:
-                        description = "No description available - missing required parameters"
+                        description = None
                     
                     _partner_link = _partner_link.replace("GD_JOB_AD", "GD_JOB_VIEW")
                     query_string = _partner_link.split("/partner/jobListing.htm?")[-1] if "/partner/jobListing.htm?" in _partner_link else ''
@@ -459,7 +460,9 @@ def scrape_glassdoor_jobs(cookies, headers, url):
                         except Exception as e:
                             print(f"Error in fuzzy matching: {e}")
                             match, score = company_name, 0
-                    
+                    if description is None:
+                        continue
+
                     if (not company_list or score > 70) and (not salary or str(salary).lower() not in ['hour', 'day', 'hourly']):
                         overview = job_item.get('jobview', {}).get('overview', {})
                         company_logo = overview.get('squareLogoUrl', '') if overview else ''
