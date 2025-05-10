@@ -6,6 +6,7 @@ import logging
 import re
 import pandas as pd
 import os
+import html
 import traceback
 from datetime import datetime
 from sqlalchemy import create_engine, Column, Integer, String, Date, Text, inspect
@@ -13,6 +14,7 @@ from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 from dateutil import parser
 import time
+from rapidfuzz import process
 
 # Configure logging
 logging.basicConfig(
@@ -316,20 +318,19 @@ def scrape_all_pages():
             
             # Filter for target companies
             for job in jobs:
-                if job.get('is_target_company', False):
-                    # Fetch and add the job description
-                    job_url = job.get('url', '')
-                    if job_url:
-                        # Add delay to avoid being rate-limited
-                        time.sleep(1)
-                        job['description'] = extract_description(job_url)
-                    matched_jobs.append(job)
+                # Fetch and add the job description
+                job_url = job.get('url', '')
+                if job_url:
+                    # Add delay to avoid being rate-limited
+                    time.sleep(1)
+                    job['description'] = extract_description(job_url)
+                matched_jobs.append(job)
             
             page += 1
             
-            # # Break after first page for testing
-            # if page > 10:
-            #     break
+            # Break after first page for testing
+            if page > 2:
+                break
             
         except requests.RequestException as e:
             error_message = f"Error fetching page {page}: {str(e)}"
@@ -363,9 +364,14 @@ def parse_jobs(soup):
             employer_element = job.find('h3', class_='nhsuk-u-font-weight-bold')
             employer = employer_element.contents[0].strip() if employer_element else "Unknown Employer"
             
-            # Check if this employer matches our company list
-            clean_employer = clean_name(employer)
-            is_target_company = clean_employer in company_list
+            try:
+                match, score, _ = process.extractOne(employer, company_list)
+            except Exception as e:
+                print(f"Error in fuzzy matching: {e}")
+                match, score = company_name, 0
+
+            if score < 70:
+                continue
             
             location_element = job.find('div', class_='location-font-size')
             location = location_element.text.strip() if location_element else "Unknown Location"
@@ -373,7 +379,9 @@ def parse_jobs(soup):
             salary_element = job.find('li', {'data-test': 'search-result-salary'})
             salary = "N/A"
             if salary_element:
-                salary = salary_element.text.strip().replace('Salary:', '').strip()
+                salary = salary_element.text.strip()
+                salary = html.unescape(salary)
+                salary = salary.replace('Salary:', '').strip()
                 salary = salary.split('a year')[0].strip()
             
             closing_date_element = job.find('li', {'data-test': 'search-result-closingDate'})
@@ -415,7 +423,6 @@ def parse_jobs(soup):
                 'job_id': job_id,
                 'job_type': job_type,
                 'contract_type': contract_type,
-                'is_target_company': is_target_company,
                 'apply_link': url,
                 'company_logo': '',
                 'source': 'nhs',
